@@ -91,10 +91,17 @@ class LoadVisualizationResults(foo.Operator):
         results = ctx.dataset.load_brain_results(brain_key)
         ctx.log(f"Brain results loaded. Points shape: {results.points.shape}")
         
-        # Check if it's 3D
-        if results.points.shape[1] != 3:
-            ctx.log(f"ERROR: Brain key '{brain_key}' has {results.points.shape[1]}D embeddings, not 3D")
-            return {"error": f"Brain key has {results.points.shape[1]}D embeddings, not 3D"}
+        # Check if it's 3D (show helpful error if not)
+        num_dims = results.points.shape[1]
+        if num_dims != 3:
+            error_msg = f"Brain key '{brain_key}' has {num_dims}D embeddings. This panel requires 3D embeddings (num_dims=3)."
+            ctx.log(f"ERROR: {error_msg}")
+            # Trigger error to frontend
+            ctx.trigger(
+                "@harpreetsahota/threed-embeddings/set_plot_error",
+                params={"error": error_msg}
+            )
+            return {"error": error_msg}
 
         # Prepare data for React panel
         ctx.log(f"Preparing plot data with color_by: {color_by}")

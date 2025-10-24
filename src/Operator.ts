@@ -11,9 +11,9 @@ import {
   registerOperator,
 } from '@fiftyone/operators';
 import { useSetRecoilState } from 'recoil';
+import { usePanelStatePartial } from '@fiftyone/spaces';
 import {
   plotDataAtom,
-  selectedSampleIdsAtom,
   PlotData,
 } from './State';
 
@@ -52,29 +52,33 @@ class SetPlotData extends Operator {
 }
 
 /**
- * Operator to sync selection state when Python operator executes
+ * Operator to handle errors from Python operator
  */
-class UpdateSelection extends Operator {
+class SetPlotError extends Operator {
   get config(): OperatorConfig {
     return new OperatorConfig({
-      name: 'update_selection',
-      label: 'Update Selection',
+      name: 'set_plot_error',
+      label: 'Set Plot Error',
       unlisted: true,
     });
   }
 
   useHooks() {
-    const setSelectedSampleIds = useSetRecoilState(selectedSampleIdsAtom);
-    return { setSelectedSampleIds };
+    return {
+      setLoadingPlotError: usePanelStatePartial("loadingPlotError", null, true)[1],
+    };
   }
 
   async execute({ hooks, params }: ExecutionContext) {
     try {
-      const sampleIds = params.sample_ids as string[];
-      hooks.setSelectedSampleIds(sampleIds);
-      return { success: true, count: sampleIds.length };
+      const error = params.error;
+      hooks.setLoadingPlotError({
+        message: error,
+        stack: '',
+      });
+      return { success: true };
     } catch (error: any) {
-      console.error('Failed to update selection:', error);
+      console.error('Failed to set plot error:', error);
       return { success: false, error: error.message };
     }
   }
@@ -82,5 +86,5 @@ class UpdateSelection extends Operator {
 
 // Register operators with the plugin namespace
 registerOperator(SetPlotData, '@harpreetsahota/threed-embeddings');
-registerOperator(UpdateSelection, '@harpreetsahota/threed-embeddings');
+registerOperator(SetPlotError, '@harpreetsahota/threed-embeddings');
 

@@ -47,21 +47,19 @@ export function getBrainKeysFromDataset(dataset) {
   if (!dataset || !dataset.brainMethods) return [];
   
   return dataset.brainMethods
-    .filter(is3DVisualizationConfig)
+    .filter(isVisualizationConfig)
     .map((item) => item.key);
 }
 
 function countValid3DBrainMethods(dataset) {
   const methods = dataset?.brainMethods || [];
-  return methods.filter(is3DVisualizationConfig).length;
+  return methods.filter(isVisualizationConfig).length;
 }
 
-function is3DVisualizationConfig(item) {
-  // Check if it's a visualization config with 3 dimensions
+function isVisualizationConfig(item) {
+  // Just check if it's a visualization config - let user choose any visualization
+  // We'll handle 2D vs 3D gracefully when loading
   if (!item.config) return false;
-  const isVisualization = item.config.cls && item.config.cls.includes("fiftyone.brain.visualization");
-  // For 3D, we need num_dims to be 3 or points to be 3D
-  const is3D = item.config.num_dims === 3;
-  return isVisualization && is3D;
+  return item.config.cls && item.config.cls.includes("fiftyone.brain.visualization");
 }
 
