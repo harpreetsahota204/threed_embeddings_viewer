@@ -2,28 +2,22 @@
  * Main 3D Embeddings Panel Component
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import { registerComponent, PluginComponentType } from '@fiftyone/plugins';
 import { useOperatorExecutor } from '@fiftyone/operators';
-import { useRecoilValue } from 'recoil';
+import { useRecoilValue, useSetRecoilState } from 'recoil';
 import * as fos from '@fiftyone/state';
-import * as foo from '@fiftyone/operators';
 import Plot from 'react-plotly.js';
+import { plotDataAtom, selectedSampleIdsAtom } from './State';
 import './Operator';
 
-interface PlotData {
-  x: number[];
-  y: number[];
-  z: number[];
-  sample_ids: string[];
-  labels: string[];
-  colors: (string | number)[];
-  color_scheme: 'categorical' | 'continuous' | 'uniform';
-}
-
 const ThreeDEmbeddingsPanel: React.FC = () => {
-  const [plotData, setPlotData] = useState<PlotData | null>(null);
-  const [selectedSampleIds, setSelectedSampleIds] = useState<string[]>([]);
+  // Use Recoil state for data managed by operators
+  const plotData = useRecoilValue(plotDataAtom);
+  const selectedSampleIds = useRecoilValue(selectedSampleIdsAtom);
+  const setSelectedSampleIds = useSetRecoilState(selectedSampleIdsAtom);
+  
+  // Local state for UI concerns
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   
@@ -47,35 +41,18 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
     setError(null);
     
     try {
-      // Call operator with empty params - it will auto-select first brain key
-      console.log('Executing load_visualization_results operator...');
-      const result = await loadVisualizationExecutor.execute({});
-      console.log('Full operator result:', result);
-      console.log('Result keys:', result ? Object.keys(result) : 'null');
-      
-      // Check various possible result structures
-      if (result?.plot_data) {
-        console.log('Setting plot data from result.plot_data');
-        setPlotData(result.plot_data);
-        setSelectedSampleIds([]);
-      } else if (result?.result?.plot_data) {
-        console.log('Setting plot data from result.result.plot_data');
-        setPlotData(result.result.plot_data);
-        setSelectedSampleIds([]);
-      } else if (result?.error) {
-        console.log('Operator returned error:', result.error);
-        setError(result.error);
-      } else {
-        console.log('Unexpected result structure:', JSON.stringify(result, null, 2));
-        setError('No data received from operator');
-      }
+      // Execute operator - it will update plotDataAtom via ctx.trigger()
+      await loadVisualizationExecutor.execute({});
+      // plotData will automatically update via Recoil when SetPlotData executes
+      // Clear selection when loading new visualization
+      setSelectedSampleIds([]);
     } catch (err) {
       console.error('Error loading visualization:', err);
       setError(err instanceof Error ? err.message : 'Failed to load visualization');
     } finally {
       setIsLoading(false);
     }
-  }, [dataset, loadVisualizationExecutor]);
+  }, [dataset, loadVisualizationExecutor, setSelectedSampleIds]);
 
   // Handle selection from plot
   const handlePlotClick = useCallback(
@@ -93,7 +70,7 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
       setSelectedSampleIds(newSelection);
       await applySelectionExecutor.execute({ sample_ids: newSelection });
     },
-    [plotData, selectedSampleIds, applySelectionExecutor]
+    [plotData, selectedSampleIds, setSelectedSampleIds, applySelectionExecutor]
   );
 
   // Handle box selection
@@ -105,7 +82,7 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
       setSelectedSampleIds(selectedIds);
       await applySelectionExecutor.execute({ sample_ids: selectedIds });
     },
-    [plotData, applySelectionExecutor]
+    [plotData, setSelectedSampleIds, applySelectionExecutor]
   );
 
   // Create plot traces
@@ -306,7 +283,7 @@ registerComponent({
   label: '3D Embeddings Viewer',
   component: ThreeDEmbeddingsPanel,
   type: PluginComponentType.Panel,
-  activator: ({ dataset }) => dataset !== null,
+  activator: ({ dataset }: { dataset: any }) => dataset !== null,
 });
 
 export default ThreeDEmbeddingsPanel;
