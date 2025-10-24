@@ -8,7 +8,7 @@ import { registerComponent, PluginComponentType } from '@fiftyone/plugins';
 import { Selector, useTheme } from '@fiftyone/components';
 import { usePanelStatePartial } from '@fiftyone/spaces';
 import * as fos from '@fiftyone/state';
-import { useRecoilValue } from 'recoil';
+import { useRecoilValue, useSetRecoilState } from 'recoil';
 import Plot from 'react-plotly.js';
 import { useBrainResultsSelector } from './useBrainResult';
 import { useLabelSelector } from './useLabelSelector';
@@ -53,19 +53,22 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
     padding: "0.25rem",
   }), [theme.neutral.softBg]);
 
+  // Simple click selection using FiftyOne's selectedSamples directly
+  const selectedSamples = useRecoilValue(fos.selectedSamples);
+  const setSelectedSamples = useSetRecoilState(fos.selectedSamples);
+
   // Memoize plot traces to prevent flickering
   const plotTraces = useMemo(() => {
     if (!plotData) return [];
 
-    const resolvedSelection = plotSelection.resolvedSelection || [];
-    const selectionSet = new Set(resolvedSelection);
-    const hasSelection = resolvedSelection.length > 0;
+    const selectedSet = selectedSamples;
+    const hasSelection = selectedSet.size > 0;
 
     const selectedIndices: number[] = [];
     const unselectedIndices: number[] = [];
 
     plotData.sample_ids.forEach((id, idx) => {
-      if (hasSelection && selectionSet.has(id)) {
+      if (hasSelection && selectedSet.has(id)) {
         selectedIndices.push(idx);
       } else {
         unselectedIndices.push(idx);
@@ -109,7 +112,7 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
         text: selectedIndices.map((i) => plotData.labels[i]),
         marker: {
           size: 6,
-          color: plotSelection.selectionStyle === 'selected' ? '#ff9800' : '#ff4444',
+          color: '#ff9800',
           opacity: 1,
           line: { width: 1, color: '#ffffff' },
         },
@@ -119,8 +122,8 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
     }
 
     return traces;
-  }, [plotData, plotSelection.resolvedSelection, plotSelection.selectionStyle]);
-
+  }, [plotData, selectedSamples]);
+  
   // Handle click selection
   const handleClick = useCallback(
     (event: any) => {
@@ -129,8 +132,8 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
       const clickedIndex = event.points[0].pointIndex;
       const sampleId = plotData.sample_ids[clickedIndex];
       
-      // Get current selection
-      const currentSelection = plotSelection.resolvedSelection || [];
+      // Get current selection as array
+      const currentSelection = Array.from(selectedSamples);
       
       let newSelection: string[];
       
@@ -147,26 +150,32 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
         newSelection = [sampleId];
       }
       
-      plotSelection.handleSelected(newSelection.length > 0 ? newSelection : null, { x: [], y: [], z: [] });
+      // Update FiftyOne's selectedSamples directly (simple and fast)
+      setSelectedSamples(new Set(newSelection));
     },
-    [plotData, plotSelection]
+    [plotData, selectedSamples, setSelectedSamples]
   );
 
-  // Handle box/lasso selection (if Plotly modebar tools are used)
+  // Handle box/lasso selection (if Plotly modebar tools are used - though they don't exist for 3D)
   const handleSelected = useCallback(
     (event: any) => {
       if (!event?.points || !plotData) return;
 
       const selectedIds = event.points.map((p: any) => plotData.sample_ids[p.pointIndex]);
-      plotSelection.handleSelected(selectedIds, { x: [], y: [], z: [] });
+      setSelectedSamples(new Set(selectedIds));
     },
-    [plotData, plotSelection]
+    [plotData, setSelectedSamples]
   );
 
   // Handle deselection
   const handleDeselect = useCallback(() => {
-    plotSelection.handleSelected(null, { x: [], y: [], z: [] });
-  }, [plotSelection]);
+    setSelectedSamples(new Set());
+  }, [setSelectedSamples]);
+  
+  // Handle clear selection button
+  const handleClearSelection = useCallback(() => {
+    setSelectedSamples(new Set());
+  }, [setSelectedSamples]);
   
   // Reset camera to initial position
   const handleResetCamera = useCallback(() => {
@@ -332,9 +341,9 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
         )}
 
         {/* Clear Selection Button */}
-        {!plotSelection.selectionIsExternal && plotSelection.hasSelection && (
+        {selectedSamples.size > 0 && (
           <button
-            onClick={plotSelection.clearSelection}
+            onClick={handleClearSelection}
             style={{
               padding: '6px 12px',
               backgroundColor: 'transparent',
@@ -344,7 +353,7 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
               color: theme.text.secondary,
               fontSize: '13px',
             }}
-            title="Clear selection (Esc)"
+            title="Clear selection"
           >
             Clear Selection
           </button>
@@ -370,9 +379,9 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
         )}
 
         {/* Selection Count */}
-        {plotSelection.hasSelection && (
+        {selectedSamples.size > 0 && (
           <span style={{ color: theme.primary.plainColor, fontWeight: 500, fontSize: '13px' }}>
-            Selected: {plotSelection.resolvedSelection?.length || 0}
+            Selected: {selectedSamples.size}
           </span>
         )}
 
