@@ -41,12 +41,16 @@ class LoadVisualizationResults(foo.Operator):
             )
             return types.Property(inputs)
 
+        # Auto-select first brain key if not provided
+        default_brain_key = brain_keys[0] if len(brain_keys) == 1 else None
+
         inputs.enum(
             "brain_key",
             brain_keys,
             label="Brain Key",
             description="Select the visualization to load",
-            required=True,
+            required=False,  # Not required - will use default if not provided
+            default=default_brain_key,
         )
 
         inputs.enum(
@@ -57,7 +61,7 @@ class LoadVisualizationResults(foo.Operator):
             default="None",
         )
 
-        brain_key = ctx.params.get("brain_key")
+        brain_key = ctx.params.get("brain_key", default_brain_key)
         if brain_key:
             results = ctx.dataset.load_brain_results(brain_key)
             inputs.view(
@@ -72,6 +76,13 @@ class LoadVisualizationResults(foo.Operator):
     def execute(self, ctx):
         brain_key = ctx.params.get("brain_key")
         color_by = ctx.params.get("color_by", "None")
+
+        # If no brain_key provided, use the first available one
+        if not brain_key:
+            brain_keys = ctx.dataset.list_brain_runs(type="visualization")
+            if not brain_keys:
+                return {"error": "No 3D visualizations found"}
+            brain_key = brain_keys[0]
 
         # Load brain results
         results = ctx.dataset.load_brain_results(brain_key)

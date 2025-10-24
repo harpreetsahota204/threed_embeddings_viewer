@@ -25,35 +25,43 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
   const [plotData, setPlotData] = useState<PlotData | null>(null);
   const [selectedSampleIds, setSelectedSampleIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   
   const dataset = useRecoilValue(fos.dataset);
-  const setView = fos.useSetView();
 
+  const loadVisualizationExecutor = useOperatorExecutor(
+    '@harpreetsahota/threed-embeddings/load_visualization_results'
+  );
   const applySelectionExecutor = useOperatorExecutor(
     '@harpreetsahota/threed-embeddings/apply_selection_from_plot'
   );
 
-  // Handle loading visualization - trigger operator dialog
-  const handleLoadVisualization = useCallback(() => {
+  // Handle loading visualization - execute with empty params (operator will auto-select)
+  const handleLoadVisualization = useCallback(async () => {
     if (!dataset) {
       setError('No dataset loaded');
       return;
     }
     
+    setIsLoading(true);
     setError(null);
-    // Trigger the operator - this will show the operator dialog
-    foo.executeOperator(
-      '@harpreetsahota/threed-embeddings/load_visualization_results'
-    ).then((result) => {
+    
+    try {
+      // Call operator with empty params - it will auto-select first brain key
+      const result = await loadVisualizationExecutor.execute({});
       if (result?.plot_data) {
         setPlotData(result.plot_data);
         setSelectedSampleIds([]);
+      } else if (result?.error) {
+        setError(result.error);
       }
-    }).catch((err) => {
+    } catch (err) {
       console.error('Error loading visualization:', err);
-      setError(err?.message || 'Failed to load visualization');
-    });
-  }, [dataset]);
+      setError(err instanceof Error ? err.message : 'Failed to load visualization');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [dataset, loadVisualizationExecutor]);
 
   // Handle selection from plot
   const handlePlotClick = useCallback(
@@ -168,16 +176,18 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
       }}>
         <button
           onClick={handleLoadVisualization}
+          disabled={isLoading}
           style={{
             padding: '8px 16px',
             backgroundColor: '#3b5acf',
             color: 'white',
             border: 'none',
             borderRadius: '4px',
-            cursor: 'pointer',
+            cursor: isLoading ? 'not-allowed' : 'pointer',
+            opacity: isLoading ? 0.6 : 1,
           }}
         >
-          Load Visualization
+          {isLoading ? 'Loading...' : 'Load Visualization'}
         </button>
         
         {selectedSampleIds.length > 0 && (
@@ -223,7 +233,7 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
           </div>
         )}
         
-        {!plotData && !error && (
+        {!plotData && !isLoading && !error && (
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -235,7 +245,19 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
           </div>
         )}
         
-        {plotData && (
+        {isLoading && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            height: '100%',
+            color: '#666',
+          }}>
+            Loading visualization...
+          </div>
+        )}
+        
+        {plotData && !isLoading && (
           <Plot
             data={plotTraces as any}
             layout={{
