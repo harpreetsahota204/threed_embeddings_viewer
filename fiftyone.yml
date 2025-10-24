@@ -1,0 +1,14 @@
+name: "@harpreetsahota/threed-embeddings"
+description: "Interactive 3D embeddings visualization panel with selection support"
+version: "1.0.0"
+fiftyone:
+  version: ">=0.23.0"
+
+operators:
+  - load_visualization_results
+  - apply_selection_from_plot
+
+panels:
+  - ThreeDEmbeddingsPanel
+
+js_bundle: dist/index.umd.js

@@ -1,0 +1,27 @@
+{
+  "name": "@harpreetsahota/threed-embeddings",
+  "version": "1.0.0",
+  "description": "Interactive 3D embeddings visualization panel for FiftyOne",
+  "main": "dist/index.umd.js",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-plotly.js": "^2.6.0",
+    "plotly.js": "^2.26.0",
+    "recoil": "^0.7.7"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@types/plotly.js": "^2.12.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vite": "^4.4.0"
+  }
+}
+

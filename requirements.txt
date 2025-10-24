@@ -1,0 +1,16 @@
+# Python dependencies for 3D Embeddings Viewer Plugin
+
+# FiftyOne - required
+fiftyone>=0.23.0
+
+# FiftyOne Brain - required for compute_visualization
+fiftyone-brain>=0.15.0
+
+# NumPy - for array operations
+numpy>=1.19.0
+
+# Optional: for generating embeddings
+# torch>=2.0.0
+# torchvision>=0.15.0
+# clip-vit>=0.0.1
+
