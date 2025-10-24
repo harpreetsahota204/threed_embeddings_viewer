@@ -3,7 +3,7 @@
  * Following the same architecture as 2D embeddings, adapted for 3D visualization
  */
 
-import React, { Fragment, useMemo, useCallback, useEffect } from 'react';
+import React, { Fragment, useMemo, useCallback, useEffect, useRef } from 'react';
 import { registerComponent, PluginComponentType } from '@fiftyone/plugins';
 import { Selector, useTheme } from '@fiftyone/components';
 import { usePanelStatePartial } from '@fiftyone/spaces';
@@ -24,6 +24,7 @@ const Value = React.memo<{ value: string; className?: string }>(({ value }) => {
 
 const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bounds?: { width: number; height: number } } }) => {
   const theme = useTheme();
+  const plotRef = useRef<any>(null);
   const resetZoom = useResetPlotZoom();
   const brainResultSelector = useBrainResultsSelector();
   const labelSelector = useLabelSelector();
@@ -161,9 +162,20 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
   
   // Reset camera to initial position
   const handleResetCamera = useCallback(() => {
-    // Increment camera reset counter to force remount with default camera
-    setCameraReset();
-  }, [setCameraReset]);
+    if (plotRef.current) {
+      // Use Plotly's relayout to reset camera to default position
+      const Plotly = (window as any).Plotly;
+      if (Plotly && plotRef.current.el) {
+        Plotly.relayout(plotRef.current.el, {
+          'scene.camera': {
+            eye: { x: 1.5, y: 1.5, z: 1.5 },
+            center: { x: 0, y: 0, z: 0 },
+            up: { x: 0, y: 0, z: 1 }
+          }
+        });
+      }
+    }
+  }, []);
 
   // Memoize button style helper to prevent recreation
   const plotOptionStyle = useCallback((isActive: boolean) => ({
@@ -387,13 +399,18 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
               justifyContent: 'center',
               height: '100%',
               color: theme.text.secondary,
+              flexDirection: 'column',
+              gap: '1rem',
             }}
           >
-            Loading visualization...
+            <div>Select the Brain Key with your 3D Visualization</div>
+            <div style={{ fontSize: '0.85rem', opacity: 0.7 }}>
+              Choose from the dropdown above
+            </div>
           </div>
         )}
 
-        {!isLoading && !showPlot && brainResultSelector.hasSelection && (
+        {!isLoading && !showPlot && (
           <div
             style={{
               display: 'flex',
@@ -401,15 +418,24 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
               justifyContent: 'center',
               height: '100%',
               color: theme.text.secondary,
+              flexDirection: 'column',
+              gap: '1rem',
+              padding: '2rem',
+              textAlign: 'center',
             }}
           >
-            Select a brain key to view 3D embeddings
+            <div style={{ fontSize: '1rem' }}>
+              Select the Brain Key with your 3D Visualization
+            </div>
+            <div style={{ fontSize: '0.85rem', opacity: 0.7 }}>
+              Use the dropdown above to choose a 3D visualization to display
+            </div>
           </div>
         )}
 
         {showPlot && plotData && !isLoading && (
           <Plot
-            key={`plot-${cameraReset}`}
+            ref={plotRef}
             data={plotTraces as any}
             layout={plotLayout as any}
             config={plotConfig}
