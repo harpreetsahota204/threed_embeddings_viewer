@@ -101,7 +101,14 @@ class LoadVisualizationResults(foo.Operator):
         data = self._prepare_plot_data(ctx, results, color_by)
         ctx.log(f"Plot data prepared. Points: {len(data['x'])}")
 
-        # Return data to be read by React panel
+        # Store result in panel state for React to access
+        ctx.log(f"Triggering set_plot_data with {len(data['x'])} points")
+        ctx.trigger(
+            "@harpreetsahota/threed-embeddings/set_plot_data",
+            params={"plot_data": data}
+        )
+        
+        # Also return for good measure
         result = {"plot_data": data}
         ctx.log(f"Returning result with keys: {list(result.keys())}")
         return result
