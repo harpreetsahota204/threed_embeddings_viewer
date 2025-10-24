@@ -14,7 +14,7 @@ import { useBrainResultsSelector } from './useBrainResult';
 import { useLabelSelector } from './useLabelSelector';
 import { usePlotSelection } from './usePlotSelection';
 import { usePlot } from './usePlot';
-import { useResetPlotZoom, useZoomRevision } from './useResetPlotZoom';
+import { useResetPlotZoom, useZoomRevision, useCameraReset } from './useResetPlotZoom';
 import './Operator';
 
 // Value component for Selector (memoized to prevent re-renders)
@@ -32,6 +32,7 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
   const plotSelection = usePlotSelection();
   const { plotData, isLoading } = usePlot();
   const [zoomRev] = useZoomRevision();
+  const [cameraReset, setCameraReset] = useCameraReset();
   
   const [dragMode, setDragMode] = usePanelStatePartial(
     "dragMode",
@@ -120,15 +121,43 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
     return traces;
   }, [plotData, plotSelection.resolvedSelection, plotSelection.selectionStyle]);
 
-  // Handle lasso/box selection
+  // Handle click selection
+  const handleClick = useCallback(
+    (event: any) => {
+      if (!event?.points || !plotData) return;
+      
+      const clickedIndex = event.points[0].pointIndex;
+      const sampleId = plotData.sample_ids[clickedIndex];
+      
+      // Get current selection
+      const currentSelection = plotSelection.resolvedSelection || [];
+      
+      let newSelection: string[];
+      
+      // Check if Shift key was pressed (for multi-select)
+      if (event.event?.shiftKey) {
+        // Add to selection if not already selected, remove if selected
+        if (currentSelection.includes(sampleId)) {
+          newSelection = currentSelection.filter(id => id !== sampleId);
+        } else {
+          newSelection = [...currentSelection, sampleId];
+        }
+      } else {
+        // Single click without shift - select only this point
+        newSelection = [sampleId];
+      }
+      
+      plotSelection.handleSelected(newSelection.length > 0 ? newSelection : null, { x: [], y: [], z: [] });
+    },
+    [plotData, plotSelection]
+  );
+
+  // Handle box/lasso selection (if Plotly modebar tools are used)
   const handleSelected = useCallback(
     (event: any) => {
       if (!event?.points || !plotData) return;
 
       const selectedIds = event.points.map((p: any) => plotData.sample_ids[p.pointIndex]);
-      
-      // Note: For 3D, lasso points aren't as straightforward as 2D
-      // We'll store the selection but not the lasso path for now
       plotSelection.handleSelected(selectedIds, { x: [], y: [], z: [] });
     },
     [plotData, plotSelection]
@@ -138,6 +167,12 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
   const handleDeselect = useCallback(() => {
     plotSelection.handleSelected(null, { x: [], y: [], z: [] });
   }, [plotSelection]);
+  
+  // Reset camera to initial position
+  const handleResetCamera = useCallback(() => {
+    // Increment camera reset counter to force remount with default camera
+    setCameraReset();
+  }, [setCameraReset]);
 
   // Memoize button style helper to prevent recreation
   const plotOptionStyle = useCallback((isActive: boolean) => ({
@@ -289,45 +324,10 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
             />
           )}
 
-        {/* Interaction Mode Buttons */}
-        {showPlot && plotData && (
-          <div
-            style={{
-              display: 'flex',
-              gap: '4px',
-              border: `1px solid ${theme.primary.plainBorder}`,
-              borderRadius: '4px',
-              padding: '2px',
-            }}
-          >
-            <button
-              onClick={() => setDragMode('turntable')}
-              style={plotOptionStyle(dragMode === 'turntable')}
-              title="Rotate mode - rotate the plot around center"
-            >
-              Rotate
-            </button>
-            <button
-              onClick={() => setDragMode('orbit')}
-              style={plotOptionStyle(dragMode === 'orbit')}
-              title="Orbit mode - free rotation"
-            >
-              Orbit
-            </button>
-            <button
-              onClick={() => setDragMode('pan')}
-              style={plotOptionStyle(dragMode === 'pan')}
-              title="Pan mode - move the plot"
-            >
-              Pan
-            </button>
-          </div>
-        )}
-        
-        {/* Info text about box select */}
+        {/* Info text about selection */}
         {showPlot && plotData && (
           <span style={{ fontSize: '12px', color: theme.text.secondary, fontStyle: 'italic' }}>
-            Use toolbar to box select points
+            Click points to select • Shift+Click for multiple
           </span>
         )}
 
@@ -350,10 +350,10 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
           </button>
         )}
 
-        {/* Reset Zoom Button */}
+        {/* Reset View Button */}
         {showPlot && plotData && (
           <button
-            onClick={resetZoom}
+            onClick={handleResetCamera}
             style={{
               padding: '6px 12px',
               backgroundColor: 'transparent',
@@ -363,9 +363,9 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
               color: theme.text.secondary,
               fontSize: '13px',
             }}
-            title="Reset zoom"
+            title="Reset camera view"
           >
-            Reset Zoom
+            Reset View
           </button>
         )}
 
@@ -418,11 +418,12 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
 
         {showPlot && plotData && !isLoading && (
           <Plot
-            key={`plot-${zoomRev}`}
+            key={`plot-${cameraReset}`}
             data={plotTraces as any}
             layout={plotLayout as any}
             config={plotConfig}
             style={plotStyle}
+            onClick={handleClick}
             onSelected={handleSelected}
             onDeselect={handleDeselect}
             useResizeHandler={true}
