@@ -35,7 +35,7 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
   
   const [dragMode, setDragMode] = usePanelStatePartial(
     "dragMode",
-    "orbit",
+    "turntable",
     true
   );
   const [loadingPlotError] = usePanelStatePartial(
@@ -157,9 +157,9 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
   const plotLayout = useMemo(() => ({
     autosize: true,
     uirevision: zoomRev,
-    dragmode: dragMode,
     margin: { l: 0, r: 0, t: 0, b: 0 },
     scene: {
+      dragmode: dragMode, // For 3D, dragmode goes in scene, not layout!
       xaxis: {
         title: 'Component 1',
         showgrid: true,
@@ -181,7 +181,7 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
       camera: { eye: { x: 1.5, y: 1.5, z: 1.5 } },
       bgcolor: theme.background.level1,
     },
-    hovermode: dragMode === 'orbit' ? 'closest' : false,
+    hovermode: 'closest',
     paper_bgcolor: theme.background.level1,
     plot_bgcolor: theme.background.level1,
   }), [zoomRev, dragMode, theme.primary.plainBorder, theme.background.level1]);
@@ -191,7 +191,8 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
     displayModeBar: true,
     displaylogo: false,
     responsive: true,
-    modeBarButtonsToRemove: ['toImage'],
+    modeBarButtonsToRemove: ['toImage', 'sendDataToCloud'],
+    // Keep selection tools visible (box select, lasso select if available)
   }), []);
 
   // Stable style object
@@ -300,18 +301,18 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
             }}
           >
             <button
-              onClick={() => setDragMode('orbit')}
-              style={plotOptionStyle(dragMode === 'orbit')}
-              title="Orbit mode - rotate and zoom"
+              onClick={() => setDragMode('turntable')}
+              style={plotOptionStyle(dragMode === 'turntable')}
+              title="Rotate mode - rotate the plot around center"
             >
-              Orbit
+              Rotate
             </button>
             <button
-              onClick={() => setDragMode('lasso')}
-              style={plotOptionStyle(dragMode === 'lasso')}
-              title="Lasso mode - select points"
+              onClick={() => setDragMode('orbit')}
+              style={plotOptionStyle(dragMode === 'orbit')}
+              title="Orbit mode - free rotation"
             >
-              Lasso
+              Orbit
             </button>
             <button
               onClick={() => setDragMode('pan')}
@@ -321,6 +322,13 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
               Pan
             </button>
           </div>
+        )}
+        
+        {/* Info text about box select */}
+        {showPlot && plotData && (
+          <span style={{ fontSize: '12px', color: theme.text.secondary, fontStyle: 'italic' }}>
+            Use toolbar to box select points
+          </span>
         )}
 
         {/* Clear Selection Button */}
