@@ -17,12 +17,12 @@ import { usePlot } from './usePlot';
 import { useResetPlotZoom, useZoomRevision } from './useResetPlotZoom';
 import './Operator';
 
-// Value component for Selector
-const Value: React.FC<{ value: string; className?: string }> = ({ value }) => {
+// Value component for Selector (memoized to prevent re-renders)
+const Value = React.memo<{ value: string; className?: string }>(({ value }) => {
   return <>{value}</>;
-};
+});
 
-function ThreeDEmbeddingsPanel({ dimensions }: { dimensions?: { bounds?: { width: number; height: number } } }) {
+const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bounds?: { width: number; height: number } } }) => {
   const theme = useTheme();
   const resetZoom = useResetPlotZoom();
   const brainResultSelector = useBrainResultsSelector();
@@ -44,13 +44,13 @@ function ThreeDEmbeddingsPanel({ dimensions }: { dimensions?: { bounds?: { width
     true
   );
 
-  // Selector styles
-  const selectorStyle = {
+  // Memoize selector styles to prevent object recreation
+  const selectorStyle = useMemo(() => ({
     background: theme.neutral.softBg,
     borderTopLeftRadius: 3,
     borderTopRightRadius: 3,
     padding: "0.25rem",
-  };
+  }), [theme.neutral.softBg]);
 
   // Memoize plot traces to prevent flickering
   const plotTraces = useMemo(() => {
@@ -139,8 +139,8 @@ function ThreeDEmbeddingsPanel({ dimensions }: { dimensions?: { bounds?: { width
     plotSelection.handleSelected(null, { x: [], y: [], z: [] });
   }, [plotSelection]);
 
-  // Button style helper
-  const plotOptionStyle = (isActive: boolean) => ({
+  // Memoize button style helper to prevent recreation
+  const plotOptionStyle = useCallback((isActive: boolean) => ({
     padding: '6px 12px',
     backgroundColor: isActive ? theme.primary.plainColor : 'transparent',
     color: isActive ? theme.primary.plainActiveBg : theme.text.secondary,
@@ -151,7 +151,51 @@ function ThreeDEmbeddingsPanel({ dimensions }: { dimensions?: { bounds?: { width
     fontWeight: isActive ? 600 : 400,
     opacity: isActive ? 1 : 0.7,
     transition: 'all 0.2s',
-  });
+  }), [theme.primary.plainColor, theme.primary.plainActiveBg, theme.text.secondary]);
+
+  // Memoize plot layout to prevent flickering
+  const plotLayout = useMemo(() => ({
+    autosize: true,
+    uirevision: zoomRev,
+    dragmode: dragMode,
+    margin: { l: 0, r: 0, t: 0, b: 0 },
+    scene: {
+      xaxis: {
+        title: 'Component 1',
+        showgrid: true,
+        zeroline: false,
+        gridcolor: theme.primary.plainBorder,
+      },
+      yaxis: {
+        title: 'Component 2',
+        showgrid: true,
+        zeroline: false,
+        gridcolor: theme.primary.plainBorder,
+      },
+      zaxis: {
+        title: 'Component 3',
+        showgrid: true,
+        zeroline: false,
+        gridcolor: theme.primary.plainBorder,
+      },
+      camera: { eye: { x: 1.5, y: 1.5, z: 1.5 } },
+      bgcolor: theme.background.level1,
+    },
+    hovermode: dragMode === 'orbit' ? 'closest' : false,
+    paper_bgcolor: theme.background.level1,
+    plot_bgcolor: theme.background.level1,
+  }), [zoomRev, dragMode, theme.primary.plainBorder, theme.background.level1]);
+
+  // Memoize plot config to prevent flickering
+  const plotConfig = useMemo(() => ({
+    displayModeBar: true,
+    displaylogo: false,
+    responsive: true,
+    modeBarButtonsToRemove: ['toImage'],
+  }), []);
+
+  // Stable style object
+  const plotStyle = useMemo(() => ({ width: '100%', height: '100%' }), []);
 
   // Show error if present
   if (loadingPlotError) {
@@ -366,45 +410,11 @@ function ThreeDEmbeddingsPanel({ dimensions }: { dimensions?: { bounds?: { width
 
         {showPlot && plotData && !isLoading && (
           <Plot
+            key={`plot-${zoomRev}`}
             data={plotTraces as any}
-            layout={{
-              autosize: true,
-              uirevision: zoomRev,
-              dragmode: dragMode,
-              margin: { l: 0, r: 0, t: 0, b: 0 },
-              scene: {
-                xaxis: {
-                  title: 'Component 1',
-                  showgrid: true,
-                  zeroline: false,
-                  gridcolor: theme.primary.plainBorder,
-                },
-                yaxis: {
-                  title: 'Component 2',
-                  showgrid: true,
-                  zeroline: false,
-                  gridcolor: theme.primary.plainBorder,
-                },
-                zaxis: {
-                  title: 'Component 3',
-                  showgrid: true,
-                  zeroline: false,
-                  gridcolor: theme.primary.plainBorder,
-                },
-                camera: { eye: { x: 1.5, y: 1.5, z: 1.5 } },
-                bgcolor: theme.background.level1,
-              },
-              hovermode: dragMode === 'orbit' ? 'closest' : false,
-              paper_bgcolor: theme.background.level1,
-              plot_bgcolor: theme.background.level1,
-            }}
-            config={{
-              displayModeBar: true,
-              displaylogo: false,
-              responsive: true,
-              modeBarButtonsToRemove: ['toImage'],
-            }}
-            style={{ width: '100%', height: '100%' }}
+            layout={plotLayout as any}
+            config={plotConfig}
+            style={plotStyle}
             onSelected={handleSelected}
             onDeselect={handleDeselect}
             useResizeHandler={true}
@@ -413,7 +423,7 @@ function ThreeDEmbeddingsPanel({ dimensions }: { dimensions?: { bounds?: { width
       </div>
     </div>
   );
-}
+});
 
 registerComponent({
   name: 'ThreeDEmbeddingsPanel',
