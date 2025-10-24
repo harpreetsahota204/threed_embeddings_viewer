@@ -3,10 +3,12 @@
  */
 
 import React, { useState, useCallback, useEffect } from 'react';
+import { registerComponent, PluginComponentType } from '@fiftyone/plugins';
 import { useOperatorExecutor } from '@fiftyone/operators';
 import { useRecoilValue } from 'recoil';
 import * as fos from '@fiftyone/state';
 import Plot from 'react-plotly.js';
+import './Operator';
 
 interface PlotData {
   x: number[];
@@ -278,6 +280,14 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
       </div>
     </div>
   );
-};
+}
+
+registerComponent({
+  name: 'ThreeDEmbeddingsPanel',
+  label: '3D Embeddings Viewer',
+  component: ThreeDEmbeddingsPanel,
+  type: PluginComponentType.Panel,
+  activator: ({ dataset }) => dataset !== null,
+});
 
 export default ThreeDEmbeddingsPanel;
