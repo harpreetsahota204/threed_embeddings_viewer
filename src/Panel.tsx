@@ -27,7 +27,7 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   
   const dataset = useRecoilValue(fos.dataset);
-  const executeOperator = foo.useOperatorExecutor();
+  const setView = fos.useSetView();
 
   const applySelectionExecutor = useOperatorExecutor(
     '@harpreetsahota/threed-embeddings/apply_selection_from_plot'
@@ -42,22 +42,18 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
     
     setError(null);
     // Trigger the operator - this will show the operator dialog
-    executeOperator(
-      '@harpreetsahota/threed-embeddings/load_visualization_results',
-      {
-        on_success: (result) => {
-          if (result?.plot_data) {
-            setPlotData(result.plot_data);
-            setSelectedSampleIds([]);
-          }
-        },
-        on_error: (err) => {
-          console.error('Error loading visualization:', err);
-          setError(err?.message || 'Failed to load visualization');
-        }
+    foo.executeOperator(
+      '@harpreetsahota/threed-embeddings/load_visualization_results'
+    ).then((result) => {
+      if (result?.plot_data) {
+        setPlotData(result.plot_data);
+        setSelectedSampleIds([]);
       }
-    );
-  }, [dataset, executeOperator]);
+    }).catch((err) => {
+      console.error('Error loading visualization:', err);
+      setError(err?.message || 'Failed to load visualization');
+    });
+  }, [dataset]);
 
   // Handle selection from plot
   const handlePlotClick = useCallback(
