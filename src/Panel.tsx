@@ -50,17 +50,23 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
       // Call operator with empty params - it will auto-select first brain key
       console.log('Executing load_visualization_results operator...');
       const result = await loadVisualizationExecutor.execute({});
-      console.log('Operator result:', result);
+      console.log('Full operator result:', result);
+      console.log('Result keys:', result ? Object.keys(result) : 'null');
       
+      // Check various possible result structures
       if (result?.plot_data) {
-        console.log('Setting plot data:', result.plot_data);
+        console.log('Setting plot data from result.plot_data');
         setPlotData(result.plot_data);
+        setSelectedSampleIds([]);
+      } else if (result?.result?.plot_data) {
+        console.log('Setting plot data from result.result.plot_data');
+        setPlotData(result.result.plot_data);
         setSelectedSampleIds([]);
       } else if (result?.error) {
         console.log('Operator returned error:', result.error);
         setError(result.error);
       } else {
-        console.log('No plot_data or error in result:', result);
+        console.log('Unexpected result structure:', JSON.stringify(result, null, 2));
         setError('No data received from operator');
       }
     } catch (err) {

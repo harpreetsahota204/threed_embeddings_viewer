@@ -81,22 +81,30 @@ class LoadVisualizationResults(foo.Operator):
         if not brain_key:
             brain_keys = ctx.dataset.list_brain_runs(type="visualization")
             if not brain_keys:
+                ctx.log("ERROR: No 3D visualizations found")
                 return {"error": "No 3D visualizations found"}
             brain_key = brain_keys[0]
+            ctx.log(f"Auto-selected brain key: {brain_key}")
 
         # Load brain results
+        ctx.log(f"Loading brain results for key: {brain_key}")
         results = ctx.dataset.load_brain_results(brain_key)
+        ctx.log(f"Brain results loaded. Points shape: {results.points.shape}")
         
         # Check if it's 3D
         if results.points.shape[1] != 3:
-            ctx.log(f"Brain key '{brain_key}' has {results.points.shape[1]}D embeddings, not 3D")
-            return
+            ctx.log(f"ERROR: Brain key '{brain_key}' has {results.points.shape[1]}D embeddings, not 3D")
+            return {"error": f"Brain key has {results.points.shape[1]}D embeddings, not 3D"}
 
         # Prepare data for React panel
+        ctx.log(f"Preparing plot data with color_by: {color_by}")
         data = self._prepare_plot_data(ctx, results, color_by)
+        ctx.log(f"Plot data prepared. Points: {len(data['x'])}")
 
         # Return data to be read by React panel
-        return {"plot_data": data}
+        result = {"plot_data": data}
+        ctx.log(f"Returning result with keys: {list(result.keys())}")
+        return result
 
     def _get_color_fields(self, dataset):
         """Get fields that can be used for coloring."""
