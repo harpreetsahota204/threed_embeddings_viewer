@@ -48,6 +48,8 @@ module.exports = defineViteConfig({
       "@fiftyone/plugins": "__fop__",
       "@fiftyone/components": "__foc__",
       "@fiftyone/utilities": "__fou__",
+      "@fiftyone/spaces": "__fosp__",
+      "@fiftyone/looker": "__fol__",
     }),
   ],
   build: {
