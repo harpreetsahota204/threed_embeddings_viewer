@@ -23,7 +23,6 @@ interface PlotData {
 const ThreeDEmbeddingsPanel: React.FC = () => {
   const [plotData, setPlotData] = useState<PlotData | null>(null);
   const [selectedSampleIds, setSelectedSampleIds] = useState<string[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
   const dataset = useRecoilValue(fos.dataset);
@@ -35,17 +34,16 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
     '@harpreetsahota/threed-embeddings/apply_selection_from_plot'
   );
 
-  // Handle loading visualization
+  // Handle loading visualization - prompt operator dialog
   const handleLoadVisualization = useCallback(async () => {
     if (!dataset) {
       setError('No dataset loaded');
       return;
     }
     
-    setIsLoading(true);
     setError(null);
     try {
-      const result = await loadVisualizationExecutor.execute({});
+      const result = await loadVisualizationExecutor.prompt();
       if (result?.plot_data) {
         setPlotData(result.plot_data);
         setSelectedSampleIds([]);
@@ -53,8 +51,6 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
     } catch (err) {
       console.error('Error loading visualization:', err);
       setError(err instanceof Error ? err.message : 'Failed to load visualization');
-    } finally {
-      setIsLoading(false);
     }
   }, [loadVisualizationExecutor, dataset]);
 
@@ -171,18 +167,16 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
       }}>
         <button
           onClick={handleLoadVisualization}
-          disabled={isLoading}
           style={{
             padding: '8px 16px',
             backgroundColor: '#3b5acf',
             color: 'white',
             border: 'none',
             borderRadius: '4px',
-            cursor: isLoading ? 'not-allowed' : 'pointer',
-            opacity: isLoading ? 0.6 : 1,
+            cursor: 'pointer',
           }}
         >
-          {isLoading ? 'Loading...' : 'Load Visualization'}
+          Load Visualization
         </button>
         
         {selectedSampleIds.length > 0 && (
@@ -228,7 +222,7 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
           </div>
         )}
         
-        {!plotData && !isLoading && !error && (
+        {!plotData && !error && (
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -240,19 +234,7 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
           </div>
         )}
         
-        {isLoading && (
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            height: '100%',
-            color: '#666',
-          }}>
-            Loading visualization...
-          </div>
-        )}
-        
-        {plotData && !isLoading && (
+        {plotData && (
           <Plot
             data={plotTraces as any}
             layout={{
