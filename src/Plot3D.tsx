@@ -4,7 +4,7 @@
 
 import React, { useMemo, useCallback } from 'react';
 import Plot from 'react-plotly.js';
-import { PlotData } from './state';
+import { PlotData } from './State';
 
 interface Plot3DProps {
   data: PlotData;

@@ -4,7 +4,7 @@
 
 import React from 'react';
 import { useRecoilValue } from 'recoil';
-import { numPointsSelector, numSelectedSelector } from './state';
+import { numPointsSelector, numSelectedSelector } from './State';
 
 interface ControlsProps {
   onLoadVisualization: () => void;
