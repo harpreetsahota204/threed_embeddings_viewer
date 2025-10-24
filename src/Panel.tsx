@@ -124,7 +124,7 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
     return traces;
   }, [plotData, selectedSamples]);
   
-  // Handle click selection
+  // Handle click selection - simple single-click only
   const handleClick = useCallback(
     (event: any) => {
       if (!event?.points || !plotData) return;
@@ -132,28 +132,10 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
       const clickedIndex = event.points[0].pointIndex;
       const sampleId = plotData.sample_ids[clickedIndex];
       
-      // Get current selection as array
-      const currentSelection = Array.from(selectedSamples);
-      
-      let newSelection: string[];
-      
-      // Check if Shift key was pressed (for multi-select)
-      if (event.event?.shiftKey) {
-        // Add to selection if not already selected, remove if selected
-        if (currentSelection.includes(sampleId)) {
-          newSelection = currentSelection.filter(id => id !== sampleId);
-        } else {
-          newSelection = [...currentSelection, sampleId];
-        }
-      } else {
-        // Single click without shift - select only this point
-        newSelection = [sampleId];
-      }
-      
-      // Update FiftyOne's selectedSamples directly (simple and fast)
-      setSelectedSamples(new Set(newSelection));
+      // Simple: click selects one point, replacing previous selection
+      setSelectedSamples(new Set([sampleId]));
     },
-    [plotData, selectedSamples, setSelectedSamples]
+    [plotData, setSelectedSamples]
   );
 
   // Handle box/lasso selection (if Plotly modebar tools are used - though they don't exist for 3D)
@@ -336,7 +318,7 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
         {/* Info text about selection */}
         {showPlot && plotData && (
           <span style={{ fontSize: '12px', color: theme.text.secondary, fontStyle: 'italic' }}>
-            Click points to select • Shift+Click for multiple
+            Click points to select
           </span>
         )}
 
