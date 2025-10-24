@@ -10,6 +10,7 @@ author: "Harpreet Sahota"
 operators:
   - load_visualization_results
   - apply_selection_from_plot
+  - create_extended_stage
 
 # TypeScript/React panels
 panels:

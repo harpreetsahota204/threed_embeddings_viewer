@@ -236,7 +236,53 @@ class ApplySelectionFromPlot(foo.Operator):
         ctx.ops.set_selected_samples(sample_ids)
 
 
+class CreateExtendedStage(foo.Operator):
+    """Create a view stage from lasso selection to filter samples panel."""
+
+    @property
+    def config(self):
+        return foo.OperatorConfig(
+            name="create_extended_stage",
+            label="Create Extended Stage",
+            description="Create a view stage from selection to filter samples",
+            unlisted=True,
+        )
+
+    def resolve_input(self, ctx):
+        inputs = types.Object()
+        inputs.list(
+            "selection",
+            types.String(),
+            label="Selection",
+            description="Selected sample IDs",
+        )
+        inputs.str(
+            "patches_field",
+            label="Patches Field",
+            description="Patches field name if applicable",
+            required=False,
+        )
+        return types.Property(inputs)
+
+    def execute(self, ctx):
+        selection = ctx.params.get("selection", [])
+        patches_field = ctx.params.get("patches_field")
+        
+        if not selection or len(selection) == 0:
+            return {"stage": None}
+        
+        # Create a Select stage to filter to selected samples
+        # This is what makes the samples panel show only selected samples!
+        stage = {
+            "_cls": "fiftyone.core.stages.Select",
+            "kwargs": {"sample_ids": selection}
+        }
+        
+        return {"stage": stage}
+
+
 def register(plugin):
     """Register the plugin operators."""
     plugin.register(LoadVisualizationResults)
     plugin.register(ApplySelectionFromPlot)
+    plugin.register(CreateExtendedStage)
