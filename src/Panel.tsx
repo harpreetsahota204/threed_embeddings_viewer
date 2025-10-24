@@ -7,6 +7,7 @@ import { registerComponent, PluginComponentType } from '@fiftyone/plugins';
 import { useOperatorExecutor } from '@fiftyone/operators';
 import { useRecoilValue } from 'recoil';
 import * as fos from '@fiftyone/state';
+import * as foo from '@fiftyone/operators';
 import Plot from 'react-plotly.js';
 import './Operator';
 
@@ -26,33 +27,37 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   
   const dataset = useRecoilValue(fos.dataset);
+  const executeOperator = foo.useOperatorExecutor();
 
-  const loadVisualizationExecutor = useOperatorExecutor(
-    '@harpreetsahota/threed-embeddings/load_visualization_results'
-  );
   const applySelectionExecutor = useOperatorExecutor(
     '@harpreetsahota/threed-embeddings/apply_selection_from_plot'
   );
 
-  // Handle loading visualization - prompt operator dialog
-  const handleLoadVisualization = useCallback(async () => {
+  // Handle loading visualization - trigger operator dialog
+  const handleLoadVisualization = useCallback(() => {
     if (!dataset) {
       setError('No dataset loaded');
       return;
     }
     
     setError(null);
-    try {
-      const result = await loadVisualizationExecutor.prompt();
-      if (result?.plot_data) {
-        setPlotData(result.plot_data);
-        setSelectedSampleIds([]);
+    // Trigger the operator - this will show the operator dialog
+    executeOperator(
+      '@harpreetsahota/threed-embeddings/load_visualization_results',
+      {
+        on_success: (result) => {
+          if (result?.plot_data) {
+            setPlotData(result.plot_data);
+            setSelectedSampleIds([]);
+          }
+        },
+        on_error: (err) => {
+          console.error('Error loading visualization:', err);
+          setError(err?.message || 'Failed to load visualization');
+        }
       }
-    } catch (err) {
-      console.error('Error loading visualization:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load visualization');
-    }
-  }, [loadVisualizationExecutor, dataset]);
+    );
+  }, [dataset, executeOperator]);
 
   // Handle selection from plot
   const handlePlotClick = useCallback(
