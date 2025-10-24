@@ -2,8 +2,10 @@
  * Main 3D Embeddings Panel Component
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useOperatorExecutor } from '@fiftyone/operators';
+import { useRecoilValue } from 'recoil';
+import * as fos from '@fiftyone/state';
 import Plot from 'react-plotly.js';
 
 interface PlotData {
@@ -20,6 +22,9 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
   const [plotData, setPlotData] = useState<PlotData | null>(null);
   const [selectedSampleIds, setSelectedSampleIds] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  
+  const dataset = useRecoilValue(fos.dataset);
 
   const loadVisualizationExecutor = useOperatorExecutor(
     '@harpreetsahota/threed-embeddings/load_visualization_results'
@@ -30,7 +35,13 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
 
   // Handle loading visualization
   const handleLoadVisualization = useCallback(async () => {
+    if (!dataset) {
+      setError('No dataset loaded');
+      return;
+    }
+    
     setIsLoading(true);
+    setError(null);
     try {
       const result = await loadVisualizationExecutor.execute({});
       if (result?.plot_data) {
@@ -39,10 +50,11 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
       }
     } catch (err) {
       console.error('Error loading visualization:', err);
+      setError(err instanceof Error ? err.message : 'Failed to load visualization');
     } finally {
       setIsLoading(false);
     }
-  }, [loadVisualizationExecutor]);
+  }, [loadVisualizationExecutor, dataset]);
 
   // Handle selection from plot
   const handlePlotClick = useCallback(
@@ -130,6 +142,22 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
     return traces;
   })() : [];
 
+  // Show message if no dataset
+  if (!dataset) {
+    return (
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100%',
+        color: '#666',
+        fontSize: '14px',
+      }}>
+        No dataset loaded
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{
@@ -186,7 +214,19 @@ const ThreeDEmbeddingsPanel: React.FC = () => {
       </div>
       
       <div style={{ flex: 1 }}>
-        {!plotData && !isLoading && (
+        {error && (
+          <div style={{
+            padding: '12px',
+            backgroundColor: '#fee',
+            color: '#c33',
+            borderBottom: '1px solid #fcc',
+            fontSize: '14px',
+          }}>
+            Error: {error}
+          </div>
+        )}
+        
+        {!plotData && !isLoading && !error && (
           <div style={{
             display: 'flex',
             alignItems: 'center',

@@ -3,12 +3,17 @@ description: "Interactive 3D embeddings visualization panel with selection suppo
 version: "1.0.0"
 fiftyone:
   version: ">=0.23.0"
+license: "Apache 2.0"
+author: "Harpreet Sahota"
 
+# Python operators
 operators:
   - load_visualization_results
   - apply_selection_from_plot
 
+# TypeScript/React panels
 panels:
   - ThreeDEmbeddingsPanel
 
+# JavaScript bundle for panels
 js_bundle: dist/index.umd.js
