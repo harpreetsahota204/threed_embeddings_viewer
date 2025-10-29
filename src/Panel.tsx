@@ -15,7 +15,6 @@ import { useLabelSelector } from './useLabelSelector';
 import { usePlotSelection } from './usePlotSelection';
 import { usePlot } from './usePlot';
 import { useResetPlotZoom, useZoomRevision, useCameraReset } from './useResetPlotZoom';
-import { useViewSamplesEffect } from './useViewSamplesEffect';
 import './Operator';
 
 // Value component for Selector (memoized to prevent re-renders)
@@ -55,117 +54,79 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
     padding: "0.25rem",
   }), [theme.neutral.softBg]);
 
-  // Simple click selection using FiftyOne's selectedSamples directly
+  // Get selected samples for highlighting
   const selectedSamples = useRecoilValue(fos.selectedSamples);
-  const setSelectedSamples = useSetRecoilState(fos.selectedSamples);
-  
-  // Track which samples are in the current filtered view
-  const viewSampleIds = useViewSamplesEffect();
 
-  // Memoize plot traces with three-tier opacity system
+  // Memoize plot traces using Plotly's built-in selectedpoints mechanism
   const plotTraces = useMemo(() => {
     if (!plotData) return [];
 
-    const selectedSet = selectedSamples;
-    const viewSet = viewSampleIds;
-    const hasSelection = selectedSet.size > 0;
-    const hasViewFilter = viewSet !== null;
+    // resolvedSelection contains points that should be "bright" (in view or selected)
+    const resolvedSelection = plotSelection.resolvedSelection || [];
+    const selectionSet = new Set(resolvedSelection);
+    const hasPlotSelection = resolvedSelection.length > 0;
+    
+    // Also track actual user selections for highlighting
+    const userSelectedSet = selectedSamples;
+    const hasUserSelection = userSelectedSet.size > 0;
 
-    // Three tiers of points:
-    // 1. Out of view (dimmed - 20% opacity)
-    // 2. In view but unselected (normal - 70% opacity)
-    // 3. Selected (bright - 100% opacity + highlighted)
-    const outOfViewIndices: number[] = [];
-    const inViewIndices: number[] = [];
-    const selectedIndices: number[] = [];
+    // Build selectedpoints array - points that should use "selected" styling
+    const selectedpoints: number[] = [];
+    const userSelectedIndices: number[] = [];
 
     plotData.sample_ids.forEach((id, idx) => {
-      const isSelected = selectedSet.has(id);
-      const isInView = !hasViewFilter || viewSet.has(id);
-
-      if (isSelected) {
-        selectedIndices.push(idx);
-      } else if (isInView) {
-        inViewIndices.push(idx);
-      } else {
-        outOfViewIndices.push(idx);
+      // Points in resolvedSelection should be bright (in view or selected)
+      if (selectionSet.has(id)) {
+        selectedpoints.push(idx);
+      }
+      
+      // Track actual user selections separately for orange highlighting
+      if (userSelectedSet.has(id)) {
+        userSelectedIndices.push(idx);
       }
     });
 
-    const traces = [];
-
-    // 1. Out-of-view points (DIMMED - 20% opacity)
-    if (outOfViewIndices.length > 0) {
-      traces.push({
-        type: 'scatter3d',
-        mode: 'markers',
-        x: outOfViewIndices.map((i) => plotData.x[i]),
-        y: outOfViewIndices.map((i) => plotData.y[i]),
-        z: outOfViewIndices.map((i) => plotData.z[i]),
-        text: outOfViewIndices.map((i) => plotData.labels[i]),
+    // Main trace with all points
+    // Use Plotly's selectedpoints mechanism for dimming (like 2D does)
+    const mainTrace = {
+      type: 'scatter3d',
+      mode: 'markers',
+      x: plotData.x,
+      y: plotData.y,
+      z: plotData.z,
+      text: plotData.labels,
+      ids: plotData.sample_ids,
+      selectedpoints: selectedpoints.length > 0 ? selectedpoints : null,
+      marker: {
+        size: 4,
+        color: plotData.color_scheme === 'continuous' 
+          ? plotData.colors as number[]
+          : plotData.colors as string[],
+        colorscale: plotData.color_scheme === 'continuous' ? 'Viridis' : undefined,
+        showscale: plotData.color_scheme === 'continuous',
+      },
+      selected: {
         marker: {
-          size: 3,
-          color:
-            plotData.color_scheme === 'continuous'
-              ? outOfViewIndices.map((i) => plotData.colors[i] as number)
-              : outOfViewIndices.map((i) => plotData.colors[i] as string),
-          colorscale: plotData.color_scheme === 'continuous' ? 'Viridis' : undefined,
-          showscale: false,
+          opacity: hasUserSelection ? 1 : 0.7, // Bright if user selected, normal if just in view
+          size: hasUserSelection ? 6 : 4,
+          color: hasUserSelection ? '#ff9800' : undefined, // Orange if user selected
+          line: hasUserSelection ? { width: 1, color: '#ffffff' } : undefined,
+        },
+      },
+      unselected: {
+        marker: {
           opacity: 0.2, // 🎯 DIMMED (not in view)
+          size: 3,
         },
-        hovertemplate: '<b>%{text}</b> (not in view)<br>x: %{x:.3f}<br>y: %{y:.3f}<br>z: %{z:.3f}<extra></extra>',
-        showlegend: false,
-      });
-    }
+      },
+      hovertemplate: '<b>%{text}</b><br>x: %{x:.3f}<br>y: %{y:.3f}<br>z: %{z:.3f}<extra></extra>',
+      showlegend: false,
+    };
 
-    // 2. In-view unselected points (NORMAL - 70% opacity)
-    if (inViewIndices.length > 0) {
-      traces.push({
-        type: 'scatter3d',
-        mode: 'markers',
-        x: inViewIndices.map((i) => plotData.x[i]),
-        y: inViewIndices.map((i) => plotData.y[i]),
-        z: inViewIndices.map((i) => plotData.z[i]),
-        text: inViewIndices.map((i) => plotData.labels[i]),
-        marker: {
-          size: 4,
-          color:
-            plotData.color_scheme === 'continuous'
-              ? inViewIndices.map((i) => plotData.colors[i] as number)
-              : inViewIndices.map((i) => plotData.colors[i] as string),
-          colorscale: plotData.color_scheme === 'continuous' ? 'Viridis' : undefined,
-          showscale: plotData.color_scheme === 'continuous',
-          opacity: 0.7, // Normal (in view)
-        },
-        hovertemplate: '<b>%{text}</b><br>x: %{x:.3f}<br>y: %{y:.3f}<br>z: %{z:.3f}<extra></extra>',
-        showlegend: false,
-      });
-    }
-
-    // 3. Selected points (BRIGHT - 100% opacity + highlighted)
-    if (selectedIndices.length > 0) {
-      traces.push({
-        type: 'scatter3d',
-        mode: 'markers',
-        x: selectedIndices.map((i) => plotData.x[i]),
-        y: selectedIndices.map((i) => plotData.y[i]),
-        z: selectedIndices.map((i) => plotData.z[i]),
-        text: selectedIndices.map((i) => plotData.labels[i]),
-        marker: {
-          size: 6,
-          color: '#ff9800',
-          opacity: 1, // BRIGHT (selected)
-          line: { width: 1, color: '#ffffff' },
-        },
-        hovertemplate: '<b>%{text}</b> (selected)<br>x: %{x:.3f}<br>y: %{y:.3f}<br>z: %{z:.3f}<extra></extra>',
-        showlegend: false,
-      });
-    }
-
-    return traces;
-  }, [plotData, selectedSamples, viewSampleIds]);
+    return [mainTrace];
+  }, [plotData, plotSelection.resolvedSelection, plotSelection.selectionStyle, selectedSamples]);
   
-  // Handle click selection - simple single-click only
+  // Handle click selection - use plotSelection.handleSelected to avoid freezing
   const handleClick = useCallback(
     (event: any) => {
       if (!event?.points || !plotData) return;
@@ -173,32 +134,34 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
       const clickedIndex = event.points[0].pointIndex;
       const sampleId = plotData.sample_ids[clickedIndex];
       
-      // Simple: click selects one point, replacing previous selection
-      setSelectedSamples(new Set([sampleId]));
+      // Use plotSelection.handleSelected which properly manages state
+      plotSelection.handleSelected([sampleId], { x: [], y: [], z: [] });
     },
-    [plotData, setSelectedSamples]
+    [plotData, plotSelection]
   );
 
-  // Handle box/lasso selection (if Plotly modebar tools are used - though they don't exist for 3D)
+  // Handle box/lasso selection
   const handleSelected = useCallback(
     (event: any) => {
       if (!event?.points || !plotData) return;
 
       const selectedIds = event.points.map((p: any) => plotData.sample_ids[p.pointIndex]);
-      setSelectedSamples(new Set(selectedIds));
+      
+      // Use plotSelection.handleSelected which properly manages state
+      plotSelection.handleSelected(selectedIds, { x: [], y: [], z: [] });
     },
-    [plotData, setSelectedSamples]
+    [plotData, plotSelection]
   );
 
   // Handle deselection
   const handleDeselect = useCallback(() => {
-    setSelectedSamples(new Set());
-  }, [setSelectedSamples]);
+    plotSelection.handleSelected(null, null);
+  }, [plotSelection]);
   
   // Handle clear selection button
   const handleClearSelection = useCallback(() => {
-    setSelectedSamples(new Set());
-  }, [setSelectedSamples]);
+    plotSelection.clearSelection();
+  }, [plotSelection]);
   
   // Reset camera to initial position
   const handleResetCamera = useCallback(() => {
@@ -375,7 +338,7 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
         )}
 
         {/* Clear Selection Button */}
-        {selectedSamples.size > 0 && (
+        {plotSelection.hasSelection && !plotSelection.selectionIsExternal && (
           <button
             onClick={handleClearSelection}
             style={{
@@ -413,9 +376,12 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
         )}
 
         {/* Selection Count */}
-        {selectedSamples.size > 0 && (
+        {plotSelection.hasSelection && (
           <span style={{ color: theme.primary.plainColor, fontWeight: 500, fontSize: '13px' }}>
-            Selected: {selectedSamples.size}
+            {plotSelection.selectionStyle === 'selected' && selectedSamples.size > 0
+              ? `Selected: ${selectedSamples.size}`
+              : `In view: ${plotSelection.resolvedSelection?.length || 0}`
+            }
           </span>
         )}
 
