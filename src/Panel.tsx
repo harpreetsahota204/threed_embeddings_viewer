@@ -15,6 +15,7 @@ import { useLabelSelector } from './useLabelSelector';
 import { usePlotSelection } from './usePlotSelection';
 import { usePlot } from './usePlot';
 import { useResetPlotZoom, useZoomRevision, useCameraReset } from './useResetPlotZoom';
+import { useViewSamplesEffect } from './useViewSamplesEffect';
 import './Operator';
 
 // Value component for Selector (memoized to prevent re-renders)
@@ -57,52 +58,91 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
   // Simple click selection using FiftyOne's selectedSamples directly
   const selectedSamples = useRecoilValue(fos.selectedSamples);
   const setSelectedSamples = useSetRecoilState(fos.selectedSamples);
+  
+  // Track which samples are in the current filtered view
+  const viewSampleIds = useViewSamplesEffect();
 
-  // Memoize plot traces to prevent flickering
+  // Memoize plot traces with three-tier opacity system
   const plotTraces = useMemo(() => {
     if (!plotData) return [];
 
     const selectedSet = selectedSamples;
+    const viewSet = viewSampleIds;
     const hasSelection = selectedSet.size > 0;
+    const hasViewFilter = viewSet !== null;
 
+    // Three tiers of points:
+    // 1. Out of view (dimmed - 20% opacity)
+    // 2. In view but unselected (normal - 70% opacity)
+    // 3. Selected (bright - 100% opacity + highlighted)
+    const outOfViewIndices: number[] = [];
+    const inViewIndices: number[] = [];
     const selectedIndices: number[] = [];
-    const unselectedIndices: number[] = [];
 
     plotData.sample_ids.forEach((id, idx) => {
-      if (hasSelection && selectedSet.has(id)) {
+      const isSelected = selectedSet.has(id);
+      const isInView = !hasViewFilter || viewSet.has(id);
+
+      if (isSelected) {
         selectedIndices.push(idx);
+      } else if (isInView) {
+        inViewIndices.push(idx);
       } else {
-        unselectedIndices.push(idx);
+        outOfViewIndices.push(idx);
       }
     });
 
     const traces = [];
 
-    // Unselected points
-    if (unselectedIndices.length > 0) {
+    // 1. Out-of-view points (DIMMED - 20% opacity)
+    if (outOfViewIndices.length > 0) {
       traces.push({
         type: 'scatter3d',
         mode: 'markers',
-        x: unselectedIndices.map((i) => plotData.x[i]),
-        y: unselectedIndices.map((i) => plotData.y[i]),
-        z: unselectedIndices.map((i) => plotData.z[i]),
-        text: unselectedIndices.map((i) => plotData.labels[i]),
+        x: outOfViewIndices.map((i) => plotData.x[i]),
+        y: outOfViewIndices.map((i) => plotData.y[i]),
+        z: outOfViewIndices.map((i) => plotData.z[i]),
+        text: outOfViewIndices.map((i) => plotData.labels[i]),
+        marker: {
+          size: 3,
+          color:
+            plotData.color_scheme === 'continuous'
+              ? outOfViewIndices.map((i) => plotData.colors[i] as number)
+              : outOfViewIndices.map((i) => plotData.colors[i] as string),
+          colorscale: plotData.color_scheme === 'continuous' ? 'Viridis' : undefined,
+          showscale: false,
+          opacity: 0.2, // 🎯 DIMMED (not in view)
+        },
+        hovertemplate: '<b>%{text}</b> (not in view)<br>x: %{x:.3f}<br>y: %{y:.3f}<br>z: %{z:.3f}<extra></extra>',
+        showlegend: false,
+      });
+    }
+
+    // 2. In-view unselected points (NORMAL - 70% opacity)
+    if (inViewIndices.length > 0) {
+      traces.push({
+        type: 'scatter3d',
+        mode: 'markers',
+        x: inViewIndices.map((i) => plotData.x[i]),
+        y: inViewIndices.map((i) => plotData.y[i]),
+        z: inViewIndices.map((i) => plotData.z[i]),
+        text: inViewIndices.map((i) => plotData.labels[i]),
         marker: {
           size: 4,
           color:
             plotData.color_scheme === 'continuous'
-              ? unselectedIndices.map((i) => plotData.colors[i] as number)
-              : unselectedIndices.map((i) => plotData.colors[i] as string),
+              ? inViewIndices.map((i) => plotData.colors[i] as number)
+              : inViewIndices.map((i) => plotData.colors[i] as string),
           colorscale: plotData.color_scheme === 'continuous' ? 'Viridis' : undefined,
           showscale: plotData.color_scheme === 'continuous',
-          opacity: hasSelection ? 0.3 : 0.7,
+          opacity: 0.7, // Normal (in view)
         },
         hovertemplate: '<b>%{text}</b><br>x: %{x:.3f}<br>y: %{y:.3f}<br>z: %{z:.3f}<extra></extra>',
         showlegend: false,
       });
     }
 
-    // Selected points
+    // 3. Selected points (BRIGHT - 100% opacity + highlighted)
     if (selectedIndices.length > 0) {
       traces.push({
         type: 'scatter3d',
@@ -114,16 +154,16 @@ const ThreeDEmbeddingsPanel = React.memo(({ dimensions }: { dimensions?: { bound
         marker: {
           size: 6,
           color: '#ff9800',
-          opacity: 1,
+          opacity: 1, // BRIGHT (selected)
           line: { width: 1, color: '#ffffff' },
         },
-        hovertemplate: '<b>%{text}</b><br>x: %{x:.3f}<br>y: %{y:.3f}<br>z: %{z:.3f}<extra></extra>',
+        hovertemplate: '<b>%{text}</b> (selected)<br>x: %{x:.3f}<br>y: %{y:.3f}<br>z: %{z:.3f}<extra></extra>',
         showlegend: false,
       });
     }
 
     return traces;
-  }, [plotData, selectedSamples]);
+  }, [plotData, selectedSamples, viewSampleIds]);
   
   // Handle click selection - simple single-click only
   const handleClick = useCallback(

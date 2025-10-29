@@ -281,8 +281,66 @@ class CreateExtendedStage(foo.Operator):
         return {"stage": stage}
 
 
+class GetViewSamples(foo.Operator):
+    """Get sample IDs that are in the current filtered view.
+    
+    This is used to determine which points should be dimmed in the 3D plot
+    when filters or view stages are applied.
+    """
+
+    @property
+    def config(self):
+        return foo.OperatorConfig(
+            name="get_view_samples",
+            label="Get View Samples",
+            description="Get sample IDs in current view for filtering visualization",
+            unlisted=True,
+        )
+
+    def resolve_input(self, ctx):
+        inputs = types.Object()
+        inputs.str(
+            "brain_key",
+            label="Brain Key",
+            description="Brain visualization key",
+            required=True,
+        )
+        return types.Property(inputs)
+
+    def execute(self, ctx):
+        brain_key = ctx.params.get("brain_key")
+        
+        if not brain_key:
+            return {"sample_ids": []}
+        
+        try:
+            # Load brain results to get all possible sample IDs
+            results = ctx.dataset.load_brain_results(brain_key)
+            all_brain_sample_ids = set(results.sample_ids)
+            
+            # Get sample IDs in the current view
+            view = ctx.view
+            view_sample_ids = []
+            
+            # Iterate through the view to get sample IDs
+            # This respects all filters, stages, and slices
+            for sample in view:
+                if sample.id in all_brain_sample_ids:
+                    view_sample_ids.append(sample.id)
+            
+            ctx.log(f"View contains {len(view_sample_ids)} of {len(all_brain_sample_ids)} brain samples")
+            
+            return {"sample_ids": view_sample_ids}
+            
+        except Exception as e:
+            ctx.log(f"Error getting view samples: {str(e)}")
+            # On error, return empty list (will show all points)
+            return {"sample_ids": []}
+
+
 def register(plugin):
     """Register the plugin operators."""
     plugin.register(LoadVisualizationResults)
     plugin.register(ApplySelectionFromPlot)
     plugin.register(CreateExtendedStage)
+    plugin.register(GetViewSamples)
