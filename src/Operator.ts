@@ -10,7 +10,13 @@ import {
   registerOperator,
 } from '@fiftyone/operators';
 import { useSetRecoilState } from 'recoil';
-import { plotDataAtom, plotErrorAtom, PlotData } from './State';
+import {
+  plotColorsAtom,
+  plotDataAtom,
+  plotErrorAtom,
+  PlotColors,
+  PlotData,
+} from './State';
 import { logError } from './logger';
 
 class SetPlotData extends Operator {
@@ -42,6 +48,32 @@ class SetPlotData extends Operator {
   }
 }
 
+class SetPlotColors extends Operator {
+  get config() {
+    return new OperatorConfig({
+      name: 'set_plot_colors',
+      label: 'Set Plot Colors',
+      unlisted: true,
+    });
+  }
+
+  useHooks() {
+    return {
+      setPlotColors: useSetRecoilState(plotColorsAtom),
+    };
+  }
+
+  async execute({ hooks, params }: any) {
+    const data = params.plot_colors as PlotColors;
+    if (!data?.labels || !data?.colors) {
+      logError('set_plot_colors: invalid payload', params);
+      return;
+    }
+
+    hooks.setPlotColors(data);
+  }
+}
+
 class SetPlotError extends Operator {
   get config() {
     return new OperatorConfig({
@@ -64,4 +96,5 @@ class SetPlotError extends Operator {
 }
 
 registerOperator(SetPlotData, '@harpreetsahota/threed-embeddings');
+registerOperator(SetPlotColors, '@harpreetsahota/threed-embeddings');
 registerOperator(SetPlotError, '@harpreetsahota/threed-embeddings');

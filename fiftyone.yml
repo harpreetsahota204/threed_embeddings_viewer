@@ -9,7 +9,9 @@ author: "Harpreet Sahota"
 # Python operators
 operators:
   - load_visualization_results
+  - get_plot_colors
   - get_view_samples
+  - get_sample_filepath
 
 # TypeScript/React panels
 panels:

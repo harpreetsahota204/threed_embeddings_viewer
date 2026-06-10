@@ -4,22 +4,33 @@
 
 import { atom } from 'recoil';
 
+// Geometry and colors are split so that recoloring (changing "Color by")
+// does not re-transfer x/y/z/ids, which dominate the payload on large
+// datasets
 export interface PlotData {
   x: number[];
   y: number[];
   z: number[];
   sample_ids: string[];
-  filepaths?: string[];
-  labels: string[];
-  colors: (string | number)[];
-  color_scheme: 'categorical' | 'continuous' | 'uniform';
 }
 
-// Plot data is delivered by the Python operator via ctx.trigger().
+export interface PlotColors {
+  labels: string[];
+  colors: (string | number)[];
+  color_scheme: 'categorical' | 'continuous';
+}
+
+// Plot data is delivered by the Python operators via ctx.trigger().
 // These are plain recoil atoms (not panel state) because triggered JS
 // operators execute outside of the panel context.
 export const plotDataAtom = atom<PlotData | null>({
   key: 'threed-embeddings-plot-data',
+  default: null,
+});
+
+// null means uncolored (uniform point color)
+export const plotColorsAtom = atom<PlotColors | null>({
+  key: 'threed-embeddings-plot-colors',
   default: null,
 });
 

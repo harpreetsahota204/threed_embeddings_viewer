@@ -116,10 +116,20 @@ function viridis(t: number): string {
   return VIRIDIS_STOPS[VIRIDIS_STOPS.length - 1][1];
 }
 
+/** Loop-based min/max; Math.min(...values) overflows the stack on ~100k+ */
+export function minMax(values: number[]): { min: number; max: number } {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of values) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return { min, max };
+}
+
 /** Converts numeric color values to viridis hex colors */
 export function numericToColors(values: number[]): string[] {
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const { min, max } = minMax(values);
   const range = max - min || 1;
   return values.map((v) => viridis((v - min) / range));
 }

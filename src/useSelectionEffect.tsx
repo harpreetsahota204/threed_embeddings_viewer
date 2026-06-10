@@ -11,6 +11,10 @@ import { useOperatorExecutor } from "@fiftyone/operators";
 import { useBrainResult } from "./useBrainResult";
 import { plotDataAtom } from "./State";
 
+// Above this many in-view samples, dimming is skipped entirely rather
+// than transferring huge ID lists on every filter change
+const MAX_DIMMING_IDS = 50000;
+
 export function useSelectionEffect() {
   const datasetName = useRecoilValue(fos.datasetName);
   const [brainKey] = useBrainResult();
@@ -39,9 +43,13 @@ export function useSelectionEffect() {
     // The execute() promise does not resolve with the result; results
     // must be read via the callback option
     getViewSamplesExecutor.execute(
-      { brain_key: brainKey },
+      { brain_key: brainKey, max_ids: MAX_DIMMING_IDS },
       {
         callback: (result: any) => {
+          if (result?.result?.too_many) {
+            setViewSelection(null);
+            return;
+          }
           const ids = result?.result?.sample_ids;
           setViewSelection(ids?.length ? ids : null);
         },

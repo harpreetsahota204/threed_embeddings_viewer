@@ -11,9 +11,15 @@ import colorsys
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
 
+_PLUGIN_URI = "@harpreetsahota/threed-embeddings"
+
 
 class LoadVisualizationResults(foo.Operator):
-    """Load 3D visualization results from FiftyOne Brain."""
+    """Load 3D visualization geometry from FiftyOne Brain results.
+
+    Colors are intentionally not included; they are fetched separately by
+    ``get_plot_colors`` so that recoloring does not re-transfer geometry.
+    """
 
     @property
     def config(self):
@@ -55,18 +61,10 @@ class LoadVisualizationResults(foo.Operator):
             default=brain_keys[0] if len(brain_keys) == 1 else None,
         )
 
-        inputs.str(
-            "color_by",
-            label="Color By",
-            description="Field to use for point colors",
-            required=False,
-        )
-
         return types.Property(inputs)
 
     def execute(self, ctx):
         brain_key = ctx.params.get("brain_key")
-        color_by = ctx.params.get("color_by")
 
         try:
             results = ctx.dataset.load_brain_results(brain_key)
@@ -78,70 +76,69 @@ class LoadVisualizationResults(foo.Operator):
                     "This panel requires 3D embeddings (num_dims=3)."
                 )
 
-            data = self._prepare_plot_data(ctx, results, color_by)
+            points = results.points
+            data = {
+                "x": points[:, 0].tolist(),
+                "y": points[:, 1].tolist(),
+                "z": points[:, 2].tolist(),
+                "sample_ids": list(results.sample_ids),
+            }
         except Exception as e:
             ctx.trigger(
-                "@harpreetsahota/threed-embeddings/set_plot_error",
-                params={"error": str(e)},
+                f"{_PLUGIN_URI}/set_plot_error", params={"error": str(e)}
+            )
+            return {"error": str(e)}
+
+        ctx.trigger(f"{_PLUGIN_URI}/set_plot_data", params={"plot_data": data})
+        return {}
+
+
+class GetPlotColors(foo.Operator):
+    """Compute per-sample labels and colors for a color-by field."""
+
+    @property
+    def config(self):
+        return foo.OperatorConfig(
+            name="get_plot_colors",
+            label="Get Plot Colors",
+            description="Compute point colors for a field",
+            unlisted=True,
+        )
+
+    def execute(self, ctx):
+        brain_key = ctx.params.get("brain_key")
+        color_by = ctx.params.get("color_by")
+
+        try:
+            results = ctx.dataset.load_brain_results(brain_key)
+            view = ctx.dataset.select(list(results.sample_ids), ordered=True)
+            labels, colors, scheme = _compute_colors(view, color_by)
+        except Exception as e:
+            ctx.trigger(
+                f"{_PLUGIN_URI}/set_plot_error", params={"error": str(e)}
             )
             return {"error": str(e)}
 
         ctx.trigger(
-            "@harpreetsahota/threed-embeddings/set_plot_data",
-            params={"plot_data": data},
+            f"{_PLUGIN_URI}/set_plot_colors",
+            params={
+                "plot_colors": {
+                    "labels": labels,
+                    "colors": colors,
+                    "color_scheme": scheme,
+                }
+            },
         )
         return {}
-
-    def _prepare_plot_data(self, ctx, results, color_by):
-        points = results.points
-        sample_ids = list(results.sample_ids)
-        view = ctx.dataset.select(sample_ids, ordered=True)
-
-        data = {
-            "x": points[:, 0].tolist(),
-            "y": points[:, 1].tolist(),
-            "z": points[:, 2].tolist(),
-            "sample_ids": sample_ids,
-            "filepaths": view.values("filepath"),
-        }
-
-        if color_by:
-            labels, colors, scheme = self._compute_colors(view, color_by)
-        else:
-            labels = [sid[:8] for sid in sample_ids]
-            colors = ["#1f77b4"] * len(sample_ids)
-            scheme = "uniform"
-
-        data["labels"] = labels
-        data["colors"] = colors
-        data["color_scheme"] = scheme
-        return data
-
-    def _compute_colors(self, view, color_field):
-        """Computes per-sample labels and colors for ``color_field``."""
-        values = [_flatten(v) for v in view.values(color_field)]
-
-        labels = [str(v) if v is not None else "None" for v in values]
-
-        is_numeric = any(_is_number(v) for v in values) and all(
-            v is None or _is_number(v) for v in values
-        )
-        if is_numeric:
-            numeric_values = [v if v is not None else 0 for v in values]
-            return labels, numeric_values, "continuous"
-
-        unique_labels = sorted(set(labels))
-        palette = _generate_color_palette(len(unique_labels))
-        color_map = dict(zip(unique_labels, palette))
-        colors = [color_map[label] for label in labels]
-        return labels, colors, "categorical"
 
 
 class GetViewSamples(foo.Operator):
     """Get sample IDs that are in the current filtered view.
 
     This is used to determine which points should be dimmed in the 3D plot
-    when filters or view stages are applied.
+    when filters or view stages are applied. When the view contains more
+    than ``max_ids`` matching samples, no IDs are returned and the frontend
+    skips dimming, avoiding multi-MB ID transfers on large datasets.
     """
 
     @property
@@ -155,16 +152,66 @@ class GetViewSamples(foo.Operator):
 
     def execute(self, ctx):
         brain_key = ctx.params.get("brain_key")
+        max_ids = ctx.params.get("max_ids")
         if not brain_key:
             return {"sample_ids": []}
 
         results = ctx.dataset.load_brain_results(brain_key)
         brain_sample_ids = set(results.sample_ids)
         view_ids = ctx.view.values("id")
+        matching = [i for i in view_ids if i in brain_sample_ids]
 
-        return {
-            "sample_ids": [i for i in view_ids if i in brain_sample_ids]
-        }
+        if max_ids is not None and len(matching) > max_ids:
+            return {"too_many": True, "count": len(matching)}
+
+        return {"sample_ids": matching}
+
+
+class GetSampleFilepath(foo.Operator):
+    """Resolve a sample's filepath for the hover thumbnail.
+
+    Looked up per hover (and cached client-side) rather than shipping all
+    filepaths with the plot data, which does not scale to large datasets.
+    """
+
+    @property
+    def config(self):
+        return foo.OperatorConfig(
+            name="get_sample_filepath",
+            label="Get Sample Filepath",
+            description="Get the filepath of a sample",
+            unlisted=True,
+        )
+
+    def execute(self, ctx):
+        sample_id = ctx.params.get("sample_id")
+        if not sample_id:
+            return {"filepath": None}
+
+        try:
+            return {"filepath": ctx.dataset[sample_id].filepath}
+        except KeyError:
+            return {"filepath": None}
+
+
+def _compute_colors(view, color_field):
+    """Computes per-sample labels and colors for ``color_field``."""
+    values = [_flatten(v) for v in view.values(color_field)]
+
+    labels = [str(v) if v is not None else "None" for v in values]
+
+    is_numeric = any(_is_number(v) for v in values) and all(
+        v is None or _is_number(v) for v in values
+    )
+    if is_numeric:
+        numeric_values = [v if v is not None else 0 for v in values]
+        return labels, numeric_values, "continuous"
+
+    unique_labels = sorted(set(labels))
+    palette = _generate_color_palette(len(unique_labels))
+    color_map = dict(zip(unique_labels, palette))
+    colors = [color_map[label] for label in labels]
+    return labels, colors, "categorical"
 
 
 def _flatten(value):
@@ -200,4 +247,6 @@ def _generate_color_palette(n):
 
 def register(plugin):
     plugin.register(LoadVisualizationResults)
+    plugin.register(GetPlotColors)
     plugin.register(GetViewSamples)
+    plugin.register(GetSampleFilepath)

@@ -7,9 +7,16 @@
  * controls over a clean, axis-less plot.
  */
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { registerComponent, PluginComponentType } from '@fiftyone/plugins';
 import { Selector, useTheme } from '@fiftyone/components';
+import { useOperatorExecutor } from '@fiftyone/operators';
 import * as fos from '@fiftyone/state';
 import { useRecoilValue } from 'recoil';
 import Plot from 'react-plotly.js';
@@ -22,13 +29,19 @@ import TabIndicator from './TabIndicator';
 import { selectIdsInLasso, projectPointToClient, Point2D } from './lasso';
 import {
   dimToward,
+  minMax,
   numericToColors,
   VIRIDIS_CSS_GRADIENT,
 } from './colors';
 import './Operator';
 
 const SELECTED_COLOR = '#ff9800';
+const UNIFORM_COLOR = '#1f77b4';
 const DEFAULT_CAMERA = { eye: { x: 1.5, y: 1.5, z: 1.5 } };
+
+// Filepaths are looked up per hover (not shipped with the plot data, which
+// does not scale); cached here so each sample is fetched at most once
+const filepathCache = new Map<string, string | null>();
 
 // Module-level so the camera survives panel remounts (applying a lasso
 // selection changes the view, which reloads the page query and remounts
@@ -70,7 +83,7 @@ const ThreeDEmbeddingsPanel = () => {
   const brainResultSelector = useBrainResultsSelector();
   const labelSelector = useLabelSelector();
   const plotSelection = usePlotSelection();
-  const { plotData, plotError } = usePlot();
+  const { plotData, plotColors, plotError } = usePlot();
   const selectedSamples = useRecoilValue(fos.selectedSamples) as Set<string>;
   const [lassoActive, setLassoActive] = useState(false);
   // Bumping this value resets the camera to the layout default (uirevision).
@@ -107,6 +120,13 @@ const ThreeDEmbeddingsPanel = () => {
     [theme]
   );
 
+  // Colors arrive separately from geometry; ignore them until they match
+  // the current geometry (eg while recoloring after a brain key switch)
+  const activeColors = useMemo(() => {
+    if (!plotData || !plotColors) return null;
+    return plotColors.colors.length === plotData.x.length ? plotColors : null;
+  }, [plotData, plotColors]);
+
   const plotTraces = useMemo(() => {
     if (!plotData) return [];
 
@@ -124,10 +144,18 @@ const ThreeDEmbeddingsPanel = () => {
     // exact base color, unselected points blend toward the background
     // (solid colors, since translucent scatter3d markers render with
     // blending artifacts).
-    const baseColors =
-      plotData.color_scheme === 'continuous'
-        ? numericToColors(plotData.colors as number[])
-        : (plotData.colors as string[]);
+    let baseColors: string[];
+    if (!activeColors) {
+      baseColors = new Array(plotData.x.length).fill(UNIFORM_COLOR);
+    } else if (activeColors.color_scheme === 'continuous') {
+      baseColors = numericToColors(activeColors.colors as number[]);
+    } else {
+      baseColors = activeColors.colors as string[];
+    }
+
+    // Hover text: the color-by value, or a shortened sample id
+    const text =
+      activeColors?.labels ?? plotData.sample_ids.map((s) => s.slice(0, 8));
 
     // NB: scatter3d halves array sizes relative to scalar sizes (array
     // values go through bubble-chart diameter scaling in
@@ -203,7 +231,7 @@ const ThreeDEmbeddingsPanel = () => {
         x: plotData.x,
         y: plotData.y,
         z: plotData.z,
-        text: plotData.labels,
+        text,
         marker: { color: colors, size: sizes, opacity: 0.85 },
         hovertemplate:
           '<b>%{text}</b><br>x: %{x:.3f}<br>y: %{y:.3f}<br>z: %{z:.3f}<extra></extra>',
@@ -212,6 +240,7 @@ const ThreeDEmbeddingsPanel = () => {
     ];
   }, [
     plotData,
+    activeColors,
     plotSelection.resolvedSelection,
     selectedSamples,
     theme.background.mediaSpace,
@@ -357,7 +386,7 @@ const ThreeDEmbeddingsPanel = () => {
 
   const handleHover = useCallback(
     (event: any) => {
-      if (lassoActive || !plotData?.filepaths) return;
+      if (lassoActive || !plotData) return;
 
       const point = event?.points?.find((p: any) => p.curveNumber === 1);
       if (!point) return;
@@ -383,18 +412,54 @@ const ThreeDEmbeddingsPanel = () => {
     setHoverPreview(null);
   }, []);
 
-  const hoverSrc = useMemo(() => {
-    if (hoverPreview === null || !plotData?.filepaths) return null;
-    const filepath = plotData.filepaths[hoverPreview.index];
-    return filepath ? (fos.getSampleSrc(filepath) as string) : null;
+  // Resolve the hovered sample's filepath lazily (one tiny request per
+  // first hover, cached afterwards)
+  const [hoverSrc, setHoverSrc] = useState<string | null>(null);
+  const getFilepathExecutor = useOperatorExecutor(
+    '@harpreetsahota/threed-embeddings/get_sample_filepath'
+  );
+
+  useEffect(() => {
+    if (hoverPreview === null || !plotData) {
+      setHoverSrc(null);
+      return;
+    }
+
+    const sampleId = plotData.sample_ids[hoverPreview.index];
+    const toSrc = (filepath: string | null) =>
+      filepath ? (fos.getSampleSrc(filepath) as string) : null;
+
+    const cached = filepathCache.get(sampleId);
+    if (cached !== undefined) {
+      setHoverSrc(toSrc(cached));
+      return;
+    }
+
+    setHoverSrc(null);
+    let stale = false;
+    getFilepathExecutor.execute(
+      { sample_id: sampleId },
+      {
+        skipErrorNotification: true,
+        callback: (result: any) => {
+          const filepath = result?.result?.filepath ?? null;
+          filepathCache.set(sampleId, filepath);
+          if (!stale) {
+            setHoverSrc(toSrc(filepath));
+          }
+        },
+      }
+    );
+    return () => {
+      stale = true;
+    };
   }, [hoverPreview, plotData]);
 
   // Min/max labels for the continuous colorscale legend
   const colorRange = useMemo(() => {
-    if (plotData?.color_scheme !== 'continuous') return null;
-    const values = plotData.colors as number[];
-    return { min: Math.min(...values), max: Math.max(...values) };
-  }, [plotData]);
+    if (activeColors?.color_scheme !== 'continuous') return null;
+    return minMax(activeColors.colors as number[]);
+  }, [activeColors]);
 
   const plotConfig = useMemo(
     () => ({
