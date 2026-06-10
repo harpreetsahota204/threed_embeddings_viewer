@@ -7,7 +7,6 @@ import {
 import * as fos from "@fiftyone/state";
 import { usePanelStatePartial } from "@fiftyone/spaces";
 import { lassoSelectionAtom, lassoStageIdAtom } from "./State";
-import { log } from "./logger";
 
 const SELECT_STAGE_CLS = "fiftyone.core.stages.Select";
 
@@ -153,14 +152,9 @@ export function usePlotSelection() {
   // click). Clearing the last point clears the whole selection.
   function toggleSelected(sampleId: string) {
     const current = lassoSelection ?? [];
-    const removing = current.includes(sampleId);
-    const next = removing
+    const next = current.includes(sampleId)
       ? current.filter((id: string) => id !== sampleId)
       : [...current, sampleId];
-    log(
-      `select mode: ${removing ? "removed" : "added"} point ${sampleId},`,
-      `selection now ${next.length} ids`
-    );
     handleSelected(next);
   }
 

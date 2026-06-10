@@ -7,7 +7,6 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Point2D } from './lasso';
-import { log } from './logger';
 
 interface LassoOverlayProps {
   // Receives the polygon in client (viewport) coordinates
@@ -44,7 +43,6 @@ const LassoOverlay: React.FC<LassoOverlayProps> = ({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        log('select mode: Esc pressed, exiting');
         onCancel();
       }
     };
@@ -142,7 +140,6 @@ const LassoOverlay: React.FC<LassoOverlayProps> = ({
         if (isDoubleClick) {
           // Suppress the pick: this click is the second half of a
           // double-click, not a selection gesture
-          log('select mode: double-click detected, toggling to explore mode');
           lastClickRef.current = null;
           onToggleMode();
         } else {

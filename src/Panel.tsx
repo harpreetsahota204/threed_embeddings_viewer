@@ -43,7 +43,6 @@ import {
   VIRIDIS_CSS_GRADIENT,
 } from './colors';
 import { lassoSelectionAtom } from './State';
-import { log } from './logger';
 import './Operator';
 
 const SELECTED_COLOR = '#ff9800';
@@ -88,6 +87,118 @@ const centerMessage = (children: React.ReactNode, color: string) => (
   </div>
 );
 
+/** Floating card next to the hovered point: thumbnail, label, coords */
+const HoverCard = ({
+  x,
+  y,
+  src,
+  label,
+  coords,
+  theme,
+}: {
+  x: number;
+  y: number;
+  src: string | null;
+  label: string;
+  coords: [number, number, number];
+  theme: any;
+}) => (
+  <div
+    style={{
+      position: 'fixed',
+      left: x + 16,
+      top: y + 16,
+      width: 122,
+      borderRadius: 4,
+      border: `1px solid ${theme.primary.plainBorder}`,
+      background: theme.background.level2,
+      overflow: 'hidden',
+      zIndex: 1000,
+      pointerEvents: 'none',
+    }}
+  >
+    {src && (
+      <img
+        key={src}
+        src={src}
+        style={{ width: 120, height: 120, objectFit: 'cover', display: 'block' }}
+        onError={(e) => {
+          (e.currentTarget as HTMLImageElement).style.display = 'none';
+        }}
+      />
+    )}
+    <div style={{ padding: '4px 6px', fontSize: '11px' }}>
+      <div
+        style={{
+          fontWeight: 600,
+          color: theme.text.primary,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ color: theme.text.secondary }}>
+        {coords.map((c) => c.toFixed(3)).join(', ')}
+      </div>
+    </div>
+  </div>
+);
+
+/** Vertical viridis legend for continuous color fields */
+const ColorLegend = ({
+  label,
+  min,
+  max,
+  theme,
+}: {
+  label: string | null;
+  min: number;
+  max: number;
+  theme: any;
+}) => (
+  <div
+    style={{
+      position: 'absolute',
+      right: '1rem',
+      top: '50%',
+      transform: 'translateY(-50%)',
+      zIndex: 10,
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'flex-end',
+      gap: 4,
+      pointerEvents: 'none',
+      color: theme.text.secondary,
+      fontSize: '11px',
+    }}
+  >
+    {label && <div style={{ marginBottom: 2 }}>{label}</div>}
+    <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
+          textAlign: 'right',
+        }}
+      >
+        <span>{max.toFixed(3)}</span>
+        <span>{min.toFixed(3)}</span>
+      </div>
+      <div
+        style={{
+          width: 12,
+          height: 160,
+          borderRadius: 2,
+          background: VIRIDIS_CSS_GRADIENT,
+        }}
+      />
+    </div>
+  </div>
+);
+
 const ThreeDEmbeddingsPanel = () => {
   const theme = useTheme();
   const plotRef = useRef<any>(null);
@@ -104,26 +215,11 @@ const ThreeDEmbeddingsPanel = () => {
   // Double-click switches between the two. Stored in panel state (not
   // useState) so deferred page-query reloads, which remount the panel,
   // don't silently kick the user back to explore mode.
-  const [selectMode, setSelectModeRaw] = usePanelStatePartial(
+  const [selectMode, setSelectMode] = usePanelStatePartial(
     'selectMode',
     false,
     true
   );
-  const setSelectMode = useCallback(
-    (active: boolean, source: string) => {
-      log(`mode: ${active ? 'select' : 'explore'} (via ${source})`);
-      setSelectModeRaw(active);
-    },
-    [setSelectModeRaw]
-  );
-
-  // Mount logging: panel remounts (page-query reloads) reset any
-  // component-local state, so knowing when they happen is essential when
-  // debugging the interaction model
-  useEffect(() => {
-    log('panel mounted');
-    return () => log('panel unmounted');
-  }, []);
   // Bumping this value resets the camera to the layout default (uirevision).
   // Must be truthy: plotly treats a falsy uirevision as "no revision" and
   // resets the camera on every data update.
@@ -190,7 +286,6 @@ const ThreeDEmbeddingsPanel = () => {
     } else {
       baseColors = activeColors.colors as string[];
     }
-
 
     // NB: scatter3d halves array sizes relative to scalar sizes (array
     // values go through bubble-chart diameter scaling in
@@ -412,9 +507,6 @@ const ThreeDEmbeddingsPanel = () => {
       if (!gd || !plotData) return;
 
       const ids = selectIdsInLasso(gd, plotData, polygon);
-      log(
-        `select mode: lasso matched ${ids.length}/${plotData.sample_ids.length} points`
-      );
       captureCamera();
       plotSelection.handleSelected(ids);
     },
@@ -428,8 +520,7 @@ const ThreeDEmbeddingsPanel = () => {
 
       const index = pickNearestPoint(gd, plotData, point);
       if (index === null) {
-        log('select mode: click on empty space (no point within radius)');
-        return; // keep mode, change nothing
+        return; // empty space: keep mode, change nothing
       }
 
       captureCamera();
@@ -439,7 +530,7 @@ const ThreeDEmbeddingsPanel = () => {
   );
 
   const handleSelectModeExit = useCallback(
-    () => setSelectMode(false, 'Esc/double-click'),
+    () => setSelectMode(false),
     [setSelectMode]
   );
 
@@ -451,7 +542,6 @@ const ThreeDEmbeddingsPanel = () => {
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && lassoSelection?.length) {
-        log(`explore mode: Esc pressed, clearing selection (${lassoSelection.length} ids)`);
         clearSelection();
       }
     };
@@ -461,7 +551,7 @@ const ThreeDEmbeddingsPanel = () => {
 
   const handleExploreDoubleClick = useCallback(() => {
     if (!plotData) return;
-    setSelectMode(true, 'double-click');
+    setSelectMode(true);
   }, [plotData, setSelectMode]);
 
   // Grab-hand cursor animates to "grabbing" while rotating the scene
@@ -612,7 +702,7 @@ const ThreeDEmbeddingsPanel = () => {
           {plotData && (
             <>
               <button
-                onClick={() => setSelectMode(!selectMode, 'button')}
+                onClick={() => setSelectMode(!selectMode)}
                 style={plotOptionStyle(selectMode)}
                 title="Double-click the plot to switch modes. Select mode: click points to toggle them, drag to lasso a region (Esc to exit)"
               >
@@ -706,104 +796,32 @@ const ThreeDEmbeddingsPanel = () => {
             />
           )}
 
-          {/* Hover card: thumbnail + color-by value + coordinates (works
-              in both explore and select modes) */}
+          {/* Hover card works in both explore and select modes */}
           {hoverPreview && (
-            <div
-              style={{
-                position: 'fixed',
-                left: hoverPreview.x + 16,
-                top: hoverPreview.y + 16,
-                width: 122,
-                borderRadius: 4,
-                border: `1px solid ${theme.primary.plainBorder}`,
-                background: theme.background.level2,
-                overflow: 'hidden',
-                zIndex: 1000,
-                pointerEvents: 'none',
-              }}
-            >
-              {hoverSrc && (
-                <img
-                  key={hoverSrc}
-                  src={hoverSrc}
-                  style={{
-                    width: 120,
-                    height: 120,
-                    objectFit: 'cover',
-                    display: 'block',
-                  }}
-                  onError={(e) => {
-                    (e.currentTarget as HTMLImageElement).style.display =
-                      'none';
-                  }}
-                />
-              )}
-              <div style={{ padding: '4px 6px', fontSize: '11px' }}>
-                <div
-                  style={{
-                    fontWeight: 600,
-                    color: theme.text.primary,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {activeColors?.labels[hoverPreview.index] ??
-                    plotData.sample_ids[hoverPreview.index].slice(0, 8)}
-                </div>
-                <div style={{ color: theme.text.secondary }}>
-                  {plotData.x[hoverPreview.index].toFixed(3)},{' '}
-                  {plotData.y[hoverPreview.index].toFixed(3)},{' '}
-                  {plotData.z[hoverPreview.index].toFixed(3)}
-                </div>
-              </div>
-            </div>
+            <HoverCard
+              x={hoverPreview.x}
+              y={hoverPreview.y}
+              src={hoverSrc}
+              label={
+                activeColors?.labels[hoverPreview.index] ??
+                plotData.sample_ids[hoverPreview.index].slice(0, 8)
+              }
+              coords={[
+                plotData.x[hoverPreview.index],
+                plotData.y[hoverPreview.index],
+                plotData.z[hoverPreview.index],
+              ]}
+              theme={theme}
+            />
           )}
 
-          {/* Colorscale legend for continuous color fields */}
           {colorRange && (
-            <div
-              style={{
-                position: 'absolute',
-                right: '1rem',
-                top: '50%',
-                transform: 'translateY(-50%)',
-                zIndex: 10,
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'flex-end',
-                gap: 4,
-                pointerEvents: 'none',
-                color: theme.text.secondary,
-                fontSize: '11px',
-              }}
-            >
-              {labelSelector.label && (
-                <div style={{ marginBottom: 2 }}>{labelSelector.label}</div>
-              )}
-              <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'space-between',
-                    textAlign: 'right',
-                  }}
-                >
-                  <span>{colorRange.max.toFixed(3)}</span>
-                  <span>{colorRange.min.toFixed(3)}</span>
-                </div>
-                <div
-                  style={{
-                    width: 12,
-                    height: 160,
-                    borderRadius: 2,
-                    background: VIRIDIS_CSS_GRADIENT,
-                  }}
-                />
-              </div>
-            </div>
+            <ColorLegend
+              label={labelSelector.label}
+              min={colorRange.min}
+              max={colorRange.max}
+              theme={theme}
+            />
           )}
         </>
       )}
