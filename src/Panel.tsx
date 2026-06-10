@@ -1,8 +1,9 @@
 /**
- * 3D Embeddings Panel
+ * Embeddings Panel
  *
- * Renders a plotly scatter3d plot of 3D brain visualization results with
- * click + custom lasso selection (scatter3d has no native selection
+ * Renders brain visualization results of any dimensionality >= 2 in a
+ * plotly scatter3d scene (2D embeddings as a flat plane viewed top-down)
+ * with click + custom lasso selection (scatter3d has no native selection
  * support). Styled to match the built-in 2D Embeddings panel: floating
  * controls over a clean, axis-less plot.
  */
@@ -40,21 +41,26 @@ import {
 } from './lasso';
 import { dimToward, minMax, numericToColors } from './colors';
 import { lassoSelectionAtom, PlotCategory } from './State';
-import { log } from './logger';
+import {
+  getSavedCamera,
+  setSavedCamera,
+  resetSavedCamera,
+} from './cameraStore';
 import './Operator';
 
 const SELECTED_COLOR = '#ff9800';
 const UNIFORM_COLOR = '#1f77b4';
 const DEFAULT_CAMERA = { eye: { x: 1.5, y: 1.5, z: 1.5 } };
+// 2D embeddings: top-down orthographic view renders like a true 2D plot
+const DEFAULT_CAMERA_2D = {
+  eye: { x: 0, y: 0, z: 2 },
+  up: { x: 0, y: 1, z: 0 },
+  projection: { type: 'orthographic' },
+};
 
 // Filepaths are looked up per hover (not shipped with the plot data, which
 // does not scale); cached here so each sample is fetched at most once
 const filepathCache = new Map<string, string | null>();
-
-// Module-level so the camera survives panel remounts (applying a lasso
-// selection changes the view, which reloads the page query and remounts
-// the panel subtree)
-let savedCamera: any = null;
 
 const HIDDEN_AXIS = {
   visible: false,
@@ -147,39 +153,6 @@ const ThreeDEmbeddingsPanel = () => {
     return plotColors.labels.length === plotData.x.length ? plotColors : null;
   }, [plotData, plotColors]);
 
-  // ── Recolor investigation instrumentation ──────────────────────────
-  // Remount tracking: a remount mid-recolor would reset component state
-  // and delay rendering
-  useEffect(() => {
-    log('panel mounted');
-    return () => log('panel unmounted');
-  }, []);
-
-  // Grid flicker correlate: the grid re-renders when the view/page query
-  // changes — color-by changes should NOT touch these
-  const view = useRecoilValue(fos.view) as any[];
-  const filters = useRecoilValue(fos.filters) as Record<string, unknown>;
-  useEffect(() => {
-    log(`view identity changed (${view?.length ?? 0} stages)`);
-  }, [view]);
-  useEffect(() => {
-    log(`filters identity changed (${Object.keys(filters ?? {}).length} keys)`);
-  }, [filters]);
-
-  // Legend populate moment: activeColors flipping from old->new is when
-  // the legend actually updates
-  useEffect(() => {
-    if (!activeColors) {
-      log('recolor: activeColors=null (uncolored or awaiting colors)');
-    } else {
-      log(
-        `recolor: activeColors applied (scheme=${activeColors.color_scheme},`,
-        `categories=${activeColors.categories?.length ?? 0})`
-      );
-    }
-  }, [activeColors]);
-  // ───────────────────────────────────────────────────────────────────
-
   // Legend click-to-highlight: class labels whose points stay bright while
   // everything else dims. Panel state so it survives remounts.
   const [highlightedClasses, setHighlightedClasses] = usePanelStatePartial(
@@ -244,7 +217,6 @@ const ThreeDEmbeddingsPanel = () => {
   const plotTraces = useMemo(() => {
     if (!plotData) return [];
 
-    const t0 = performance.now();
     const resolvedSelection = plotSelection.resolvedSelection;
 
     // scatter3d does not support selectedpoints/selected/unselected, so
@@ -357,11 +329,6 @@ const ThreeDEmbeddingsPanel = () => {
       });
     }
 
-    log(
-      `plotTraces rebuilt: ${plotData.x.length} pts in`,
-      `${(performance.now() - t0).toFixed(1)}ms`
-    );
-
     return [
       {
         type: 'scatter3d',
@@ -395,6 +362,8 @@ const ThreeDEmbeddingsPanel = () => {
     theme.background.level2,
   ]);
 
+  const is2D = plotData?.num_dims === 2;
+
   const plotLayout = useMemo(
     () => ({
       autosize: true,
@@ -406,14 +375,15 @@ const ThreeDEmbeddingsPanel = () => {
         xaxis: HIDDEN_AXIS,
         yaxis: HIDDEN_AXIS,
         zaxis: HIDDEN_AXIS,
-        camera: savedCamera || DEFAULT_CAMERA,
+        camera:
+          getSavedCamera() || (is2D ? DEFAULT_CAMERA_2D : DEFAULT_CAMERA),
         bgcolor: 'rgba(0,0,0,0)',
       },
       hovermode: false,
       paper_bgcolor: 'rgba(0,0,0,0)',
       plot_bgcolor: 'rgba(0,0,0,0)',
     }),
-    [cameraRev]
+    [cameraRev, is2D]
   );
 
   // Plotly only writes the live camera back into the layout on a clean
@@ -426,7 +396,7 @@ const ThreeDEmbeddingsPanel = () => {
     const camera =
       plotRef.current?.el?._fullLayout?.scene?._scene?.getCamera?.();
     if (camera) {
-      savedCamera = camera;
+      setSavedCamera(camera);
       plotLayout.scene.camera = camera;
     }
   }, [plotLayout]);
@@ -435,7 +405,7 @@ const ThreeDEmbeddingsPanel = () => {
     (event: any) => {
       const camera = event?.['scene.camera'];
       if (camera) {
-        savedCamera = camera;
+        setSavedCamera(camera);
         plotLayout.scene.camera = camera;
       }
     },
@@ -443,7 +413,7 @@ const ThreeDEmbeddingsPanel = () => {
   );
 
   const handleResetView = useCallback(() => {
-    savedCamera = null;
+    resetSavedCamera();
     setCameraRev((rev) => rev + 1);
   }, []);
 
@@ -685,11 +655,11 @@ const ThreeDEmbeddingsPanel = () => {
     return centerMessage(
       <>
         <div style={{ fontSize: '1.1rem', fontWeight: 500 }}>
-          No 3D visualizations found
+          No visualizations found
         </div>
         <div style={{ fontSize: '0.9rem', maxWidth: '400px' }}>
-          Compute 3D embeddings using{' '}
-          <code>fob.compute_visualization(dataset, num_dims=3)</code>
+          Compute embeddings using{' '}
+          <code>fob.compute_visualization(dataset)</code>
         </div>
       </>,
       theme.text.secondary
@@ -802,7 +772,7 @@ const ThreeDEmbeddingsPanel = () => {
         centerMessage(
           <>
             <div style={{ fontSize: '1rem' }}>
-              Select the Brain Key with your 3D Visualization
+              Select the Brain Key with your visualization
             </div>
             <div style={{ fontSize: '0.85rem', opacity: 0.7 }}>
               Use the dropdown above to choose a visualization to display

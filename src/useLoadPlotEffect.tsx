@@ -5,7 +5,7 @@ import { useOperatorExecutor } from "@fiftyone/operators";
 import { useBrainResult } from "./useBrainResult";
 import { useColorByField } from "./useLabelSelector";
 import { plotColorsAtom, plotDataAtom, plotErrorAtom } from "./State";
-import { log } from "./logger";
+import { resetSavedCamera } from "./cameraStore";
 
 // Module-level so they survive panel remounts: the App reloads the page
 // query on server "refresh" events and view changes, which remounts the
@@ -61,6 +61,9 @@ export function useLoadPlotEffect() {
     setPlotData(null);
     setPlotColors(null);
     setPlotError(null);
+    // A different visualization should not inherit the previous camera
+    // (eg a 2D plane viewed through a 3D oblique camera)
+    resetSavedCamera();
 
     geometryExecutor.execute(
       { brain_key: brainKey },
@@ -90,23 +93,14 @@ export function useLoadPlotEffect() {
 
     if (!labelField) {
       // Uncolored: uniform point color, computed client-side
-      log("recolor: uncolored selected, clearing colors");
       setPlotColors(null);
       return;
     }
 
-    log(`recolor: executing get_plot_colors (color_by=${labelField})`);
-    const t0 = performance.now();
     colorsExecutor.execute(
       { brain_key: brainKey, color_by: labelField },
       {
         callback: (result: any) => {
-          log(
-            `recolor: operator returned in ${(
-              performance.now() - t0
-            ).toFixed(0)}ms`,
-            result?.error ? `error: ${result.error}` : ""
-          );
           if (result?.error) {
             requestedColors = null;
           }

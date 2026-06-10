@@ -1,5 +1,5 @@
 name: "@harpreetsahota/threed-embeddings"
-description: "Interactive 3D embeddings visualization panel with selection support"
+description: "Interactive embeddings visualization panel (2D/3D) with lasso selection, hover previews, and a class legend"
 version: "1.0.0"
 fiftyone:
   version: ">=0.23.0"

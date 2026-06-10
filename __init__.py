@@ -16,7 +16,12 @@ _PLUGIN_URI = "@harpreetsahota/threed-embeddings"
 
 
 class LoadVisualizationResults(foo.Operator):
-    """Load 3D visualization geometry from FiftyOne Brain results.
+    """Load visualization geometry from FiftyOne Brain results.
+
+    Embeddings of any dimensionality >= 2 are supported: the first three
+    dimensions are visualized (matching the builtin Embeddings panel,
+    which plots the first two), with 2D embeddings rendered as a flat
+    plane viewed top-down.
 
     Colors are intentionally not included; they are fetched separately by
     ``get_plot_colors`` so that recoloring does not re-transfer geometry.
@@ -27,7 +32,7 @@ class LoadVisualizationResults(foo.Operator):
         return foo.OperatorConfig(
             name="load_visualization_results",
             label="Load 3D Visualization Results",
-            description="Load 3D embeddings visualization from brain results",
+            description="Load embeddings visualization from brain results",
             dynamic=True,
             unlisted=True,
         )
@@ -44,10 +49,10 @@ class LoadVisualizationResults(foo.Operator):
             inputs.view(
                 "warning",
                 types.Warning(
-                    label="No 3D visualizations found",
+                    label="No visualizations found",
                     description=(
-                        "Please compute 3D embeddings first using "
-                        "fob.compute_visualization(dataset, num_dims=3)"
+                        "Please compute embeddings first using "
+                        "fob.compute_visualization(dataset)"
                     ),
                 ),
             )
@@ -70,19 +75,23 @@ class LoadVisualizationResults(foo.Operator):
         try:
             results = ctx.dataset.load_brain_results(brain_key)
 
-            num_dims = results.points.shape[1]
-            if num_dims != 3:
+            points = results.points
+            num_dims = points.shape[1]
+            if num_dims < 2:
                 raise ValueError(
-                    f"Brain key '{brain_key}' has {num_dims}D embeddings. "
-                    "This panel requires 3D embeddings (num_dims=3)."
+                    f"Brain key '{brain_key}' has {num_dims}D embeddings; "
+                    "at least 2 dimensions are required."
                 )
 
-            points = results.points
             data = {
                 "x": points[:, 0].tolist(),
                 "y": points[:, 1].tolist(),
-                "z": points[:, 2].tolist(),
+                # 2D embeddings render as a flat plane (viewed top-down)
+                "z": points[:, 2].tolist()
+                if num_dims >= 3
+                else [0.0] * len(points),
                 "sample_ids": list(results.sample_ids),
+                "num_dims": num_dims,
             }
         except Exception as e:
             ctx.trigger(

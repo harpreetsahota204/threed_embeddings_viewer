@@ -10,8 +10,12 @@ import { atom } from 'recoil';
 export interface PlotData {
   x: number[];
   y: number[];
+  // All zeros for 2D embeddings (rendered as a flat plane)
   z: number[];
   sample_ids: string[];
+  // Original embedding dimensionality (>= 4 still plots the first 3 dims,
+  // matching the builtin 2D panel's first-2 behavior)
+  num_dims: number;
 }
 
 export interface PlotCategory {

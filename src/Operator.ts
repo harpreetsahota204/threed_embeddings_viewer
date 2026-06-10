@@ -17,7 +17,7 @@ import {
   PlotColors,
   PlotData,
 } from './State';
-import { log, logError } from './logger';
+import { logError } from './logger';
 
 class SetPlotData extends Operator {
   get config() {
@@ -75,11 +75,6 @@ class SetPlotColors extends Operator {
       return;
     }
 
-    log(
-      `recolor: set_plot_colors received (${data.labels.length} labels,`,
-      `scheme=${data.color_scheme},`,
-      `${data.categories?.length ?? 0} categories)`
-    );
     hooks.setPlotColors(data);
   }
 }

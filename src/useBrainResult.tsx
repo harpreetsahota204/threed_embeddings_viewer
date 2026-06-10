@@ -49,6 +49,6 @@ function getBrainKeysFromDataset(dataset: any): string[] {
 }
 
 function isVisualizationConfig(item: any) {
-  // 2D vs 3D is validated when loading; list all visualizations here
+  // Any dimensionality >= 2 is renderable; list all visualizations
   return !!item.config?.cls?.includes("fiftyone.brain.visualization");
 }
