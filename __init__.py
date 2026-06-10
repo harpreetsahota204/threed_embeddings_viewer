@@ -7,6 +7,7 @@
 """
 
 import colorsys
+from collections import Counter
 
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
@@ -112,7 +113,7 @@ class GetPlotColors(foo.Operator):
         try:
             results = ctx.dataset.load_brain_results(brain_key)
             view = ctx.dataset.select(list(results.sample_ids), ordered=True)
-            labels, colors, scheme = _compute_colors(view, color_by)
+            plot_colors = _compute_colors(view, color_by)
         except Exception as e:
             ctx.trigger(
                 f"{_PLUGIN_URI}/set_plot_error", params={"error": str(e)}
@@ -121,13 +122,7 @@ class GetPlotColors(foo.Operator):
 
         ctx.trigger(
             f"{_PLUGIN_URI}/set_plot_colors",
-            params={
-                "plot_colors": {
-                    "labels": labels,
-                    "colors": colors,
-                    "color_scheme": scheme,
-                }
-            },
+            params={"plot_colors": plot_colors},
         )
         return {}
 
@@ -195,31 +190,94 @@ class GetSampleFilepath(foo.Operator):
 
 
 def _compute_colors(view, color_field):
-    """Computes per-sample labels and colors for ``color_field``."""
-    values = [_flatten(v) for v in view.values(color_field)]
+    """Computes the plot colors payload for ``color_field``.
 
-    labels = [str(v) if v is not None else "None" for v in values]
+    List values (eg per-detection labels/confidences) are aggregated per
+    sample: mode for labels, mean for numbers. Hover labels carry the
+    distribution as display lines (eg ["cat: 3", "dog: 2"]) while colors
+    use the aggregate.
 
-    is_numeric = any(_is_number(v) for v in values) and all(
-        v is None or _is_number(v) for v in values
+    Returns a dict shaped for the frontend:
+        continuous:  {labels, colors (numbers), color_scheme}
+        categorical: {labels, categories, class_indices, color_scheme}
+    """
+    summaries = [_summarize(v) for v in view.values(color_field)]
+    class_values = [s[0] for s in summaries]
+    hover_labels = [s[1] for s in summaries]
+
+    is_numeric = any(_is_number(v) for v in class_values) and all(
+        v is None or _is_number(v) for v in class_values
     )
     if is_numeric:
-        numeric_values = [v if v is not None else 0 for v in values]
-        return labels, numeric_values, "continuous"
+        return {
+            "labels": hover_labels,
+            "colors": [v if v is not None else 0 for v in class_values],
+            "color_scheme": "continuous",
+        }
 
-    unique_labels = sorted(set(labels))
-    palette = _generate_color_palette(len(unique_labels))
-    color_map = dict(zip(unique_labels, palette))
-    colors = [color_map[label] for label in labels]
-    return labels, colors, "categorical"
+    class_labels = [
+        str(v) if v is not None else "None" for v in class_values
+    ]
+    ordered = _by_count(Counter(class_labels))
+    palette = _generate_color_palette(len(ordered))
+    index_map = {label: i for i, (label, _) in enumerate(ordered)}
+
+    return {
+        "labels": hover_labels,
+        "color_scheme": "categorical",
+        "categories": [
+            {"label": label, "color": palette[i], "count": count}
+            for i, (label, count) in enumerate(ordered)
+        ],
+        "class_indices": [index_map[label] for label in class_labels],
+    }
 
 
-def _flatten(value):
-    """Reduces list values (eg detections label lists) to a scalar."""
-    while isinstance(value, (list, tuple)):
-        value = value[0] if value else None
+def _summarize(value):
+    """Returns ``(aggregate_value, hover_lines)`` for a raw field value.
 
-    return value
+    ``hover_lines`` is a list of display lines: for label lists, the top 4
+    classes as ``label: count`` plus an ``N other objects`` line.
+    """
+    if not isinstance(value, (list, tuple)):
+        return value, [str(value) if value is not None else "None"]
+
+    items = _flatten_list(value)
+    if not items:
+        return None, ["None"]
+
+    if all(_is_number(v) for v in items):
+        mean = sum(items) / len(items)
+        if len(items) == 1:
+            return mean, [str(items[0])]
+        return mean, [f"{mean:.3f} (mean of {len(items)})"]
+
+    counts = _by_count(Counter(str(v) for v in items))
+    mode = counts[0][0]
+
+    lines = [f"{label}: {count}" for label, count in counts[:4]]
+    others = sum(count for _, count in counts[4:])
+    if others:
+        lines.append(f"{others} other object{'s' if others > 1 else ''}")
+
+    return mode, lines
+
+
+def _by_count(counter):
+    """Counter items sorted by count desc, then label, for determinism."""
+    return sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def _flatten_list(value):
+    """Flattens nested lists, dropping Nones."""
+    flat = []
+    for item in value:
+        if isinstance(item, (list, tuple)):
+            flat.extend(_flatten_list(item))
+        elif item is not None:
+            flat.append(item)
+
+    return flat
 
 
 def _is_number(value):

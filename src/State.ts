@@ -14,10 +14,23 @@ export interface PlotData {
   sample_ids: string[];
 }
 
+export interface PlotCategory {
+  label: string;
+  color: string;
+  count: number;
+}
+
 export interface PlotColors {
-  labels: string[];
-  colors: (string | number)[];
+  // Per-sample hover display lines; for aggregated list fields these
+  // carry the distribution (eg ["cat: 3", "dog: 2", "5 other objects"])
+  labels: string[][];
   color_scheme: 'categorical' | 'continuous';
+  // Continuous only: per-sample numeric values
+  colors?: number[];
+  // Categorical only: classes (sorted by count desc) and per-sample
+  // indices into them
+  categories?: PlotCategory[];
+  class_indices?: number[];
 }
 
 // Plot data is delivered by the Python operators via ctx.trigger().

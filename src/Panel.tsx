@@ -30,19 +30,16 @@ import {
 import { usePlot } from './usePlot';
 import LassoOverlay from './LassoOverlay';
 import TabIndicator from './TabIndicator';
+import HoverCard from './HoverCard';
+import { CategoricalLegend, ColorLegend, FloatingPanel } from './Legend';
 import {
   pickNearestPoint,
   projectPointToClient,
   selectIdsInLasso,
   Point2D,
 } from './lasso';
-import {
-  dimToward,
-  minMax,
-  numericToColors,
-  VIRIDIS_CSS_GRADIENT,
-} from './colors';
-import { lassoSelectionAtom } from './State';
+import { dimToward, minMax, numericToColors } from './colors';
+import { lassoSelectionAtom, PlotCategory } from './State';
 import './Operator';
 
 const SELECTED_COLOR = '#ff9800';
@@ -84,118 +81,6 @@ const centerMessage = (children: React.ReactNode, color: string) => (
     }}
   >
     {children}
-  </div>
-);
-
-/** Floating card next to the hovered point: thumbnail, label, coords */
-const HoverCard = ({
-  x,
-  y,
-  src,
-  label,
-  coords,
-  theme,
-}: {
-  x: number;
-  y: number;
-  src: string | null;
-  label: string;
-  coords: [number, number, number];
-  theme: any;
-}) => (
-  <div
-    style={{
-      position: 'fixed',
-      left: x + 16,
-      top: y + 16,
-      width: 122,
-      borderRadius: 4,
-      border: `1px solid ${theme.primary.plainBorder}`,
-      background: theme.background.level2,
-      overflow: 'hidden',
-      zIndex: 1000,
-      pointerEvents: 'none',
-    }}
-  >
-    {src && (
-      <img
-        key={src}
-        src={src}
-        style={{ width: 120, height: 120, objectFit: 'cover', display: 'block' }}
-        onError={(e) => {
-          (e.currentTarget as HTMLImageElement).style.display = 'none';
-        }}
-      />
-    )}
-    <div style={{ padding: '4px 6px', fontSize: '11px' }}>
-      <div
-        style={{
-          fontWeight: 600,
-          color: theme.text.primary,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {label}
-      </div>
-      <div style={{ color: theme.text.secondary }}>
-        {coords.map((c) => c.toFixed(3)).join(', ')}
-      </div>
-    </div>
-  </div>
-);
-
-/** Vertical viridis legend for continuous color fields */
-const ColorLegend = ({
-  label,
-  min,
-  max,
-  theme,
-}: {
-  label: string | null;
-  min: number;
-  max: number;
-  theme: any;
-}) => (
-  <div
-    style={{
-      position: 'absolute',
-      right: '1rem',
-      top: '50%',
-      transform: 'translateY(-50%)',
-      zIndex: 10,
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'flex-end',
-      gap: 4,
-      pointerEvents: 'none',
-      color: theme.text.secondary,
-      fontSize: '11px',
-    }}
-  >
-    {label && <div style={{ marginBottom: 2 }}>{label}</div>}
-    <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'space-between',
-          textAlign: 'right',
-        }}
-      >
-        <span>{max.toFixed(3)}</span>
-        <span>{min.toFixed(3)}</span>
-      </div>
-      <div
-        style={{
-          width: 12,
-          height: 160,
-          borderRadius: 2,
-          background: VIRIDIS_CSS_GRADIENT,
-        }}
-      />
-    </div>
   </div>
 );
 
@@ -258,8 +143,66 @@ const ThreeDEmbeddingsPanel = () => {
   // the current geometry (eg while recoloring after a brain key switch)
   const activeColors = useMemo(() => {
     if (!plotData || !plotColors) return null;
-    return plotColors.colors.length === plotData.x.length ? plotColors : null;
+    return plotColors.labels.length === plotData.x.length ? plotColors : null;
   }, [plotData, plotColors]);
+
+  // Legend click-to-highlight: class labels whose points stay bright while
+  // everything else dims. Panel state so it survives remounts.
+  const [highlightedClasses, setHighlightedClasses] = usePanelStatePartial(
+    'highlightedClasses',
+    [],
+    true
+  );
+
+  // Sample ids in the current filtered view (set by useSelectionEffect);
+  // used here to adjust legend counts to the view
+  const [viewSelection] = usePanelStatePartial('viewSelection', null, true);
+
+  // Per-category counts within the current view; null when unfiltered
+  const viewCounts = useMemo(() => {
+    if (
+      !plotData ||
+      !activeColors?.categories ||
+      !activeColors.class_indices ||
+      !viewSelection?.length
+    ) {
+      return null;
+    }
+
+    const inView = new Set(viewSelection);
+    const counts = new Array(activeColors.categories.length).fill(0);
+    plotData.sample_ids.forEach((id, i) => {
+      if (inView.has(id)) {
+        counts[activeColors.class_indices![i]]++;
+      }
+    });
+    return counts;
+  }, [plotData, activeColors, viewSelection]);
+
+  // Drop highlights for classes that no longer exist (color-by changed)
+  useEffect(() => {
+    if (!highlightedClasses?.length) return;
+    const known = new Set(
+      (activeColors?.categories ?? []).map((c: PlotCategory) => c.label)
+    );
+    const pruned = highlightedClasses.filter((label: string) =>
+      known.has(label)
+    );
+    if (pruned.length !== highlightedClasses.length) {
+      setHighlightedClasses(pruned);
+    }
+  }, [activeColors, highlightedClasses]);
+
+  const toggleHighlightedClass = useCallback(
+    (label: string) => {
+      setHighlightedClasses((current: string[] = []) =>
+        current.includes(label)
+          ? current.filter((l) => l !== label)
+          : [...current, label]
+      );
+    },
+    [setHighlightedClasses]
+  );
 
   const plotTraces = useMemo(() => {
     if (!plotData) return [];
@@ -282,10 +225,28 @@ const ThreeDEmbeddingsPanel = () => {
     if (!activeColors) {
       baseColors = new Array(plotData.x.length).fill(UNIFORM_COLOR);
     } else if (activeColors.color_scheme === 'continuous') {
-      baseColors = numericToColors(activeColors.colors as number[]);
+      baseColors = numericToColors(activeColors.colors!);
     } else {
-      baseColors = activeColors.colors as string[];
+      const categories = activeColors.categories!;
+      baseColors = activeColors.class_indices!.map(
+        (i) => categories[i].color
+      );
     }
+
+    // Class highlight (legend clicks): applies only when no sample
+    // selection/filter is active — any selection tier beats it
+    const highlightedIndexSet =
+      !resolvedSelection &&
+      activeColors?.class_indices &&
+      highlightedClasses?.length
+        ? new Set(
+            activeColors
+              .categories!.map((c, i) =>
+                highlightedClasses.includes(c.label) ? i : -1
+              )
+              .filter((i) => i >= 0)
+          )
+        : null;
 
     // NB: scatter3d halves array sizes relative to scalar sizes (array
     // values go through bubble-chart diameter scaling in
@@ -317,14 +278,27 @@ const ThreeDEmbeddingsPanel = () => {
       halo.sizes.push(size * HALO_SCALE);
     };
 
-    if (!resolvedSelection) {
+    // The visible plot background is the spaces panel background
+    const background = theme.background.mediaSpace || theme.background.level2;
+
+    if (highlightedIndexSet) {
+      colors = [];
+      sizes = [];
+      activeColors!.class_indices!.forEach((classIndex, i) => {
+        if (highlightedIndexSet.has(classIndex)) {
+          colors.push(baseColors[i]);
+          sizes.push(BASE_SIZE);
+          addHalo(i, baseColors[i], BASE_SIZE);
+        } else {
+          colors.push(dimToward(baseColors[i], background, 0.8));
+          sizes.push(DIMMED_SIZE);
+        }
+      });
+    } else if (!resolvedSelection) {
       colors = baseColors;
       sizes = new Array(plotData.x.length).fill(BASE_SIZE);
     } else {
       const selectionSet = new Set(resolvedSelection);
-      // The visible plot background is the spaces panel background
-      const background =
-        theme.background.mediaSpace || theme.background.level2;
 
       colors = [];
       sizes = [];
@@ -370,6 +344,7 @@ const ThreeDEmbeddingsPanel = () => {
   }, [
     plotData,
     activeColors,
+    highlightedClasses,
     plotSelection.resolvedSelection,
     selectedSamples,
     theme.background.mediaSpace,
@@ -534,20 +509,31 @@ const ThreeDEmbeddingsPanel = () => {
     [setSelectMode]
   );
 
-  // Esc in explore mode clears the selection and grid filtering (the 2D
-  // embeddings panel behavior). In select mode, Esc exits the mode first
-  // (handled by the overlay); the next Esc then clears.
+  // Esc in explore mode clears class highlights, the selection, and grid
+  // filtering together (the 2D embeddings panel behavior). In select mode,
+  // Esc exits the mode first (handled by the overlay); the next Esc then
+  // clears.
   useEffect(() => {
     if (selectMode) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && lassoSelection?.length) {
+      if (e.key !== 'Escape') return;
+      if (highlightedClasses?.length) {
+        setHighlightedClasses([]);
+      }
+      if (lassoSelection?.length) {
         clearSelection();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [selectMode, lassoSelection, clearSelection]);
+  }, [
+    selectMode,
+    lassoSelection,
+    clearSelection,
+    highlightedClasses,
+    setHighlightedClasses,
+  ]);
 
   const handleExploreDoubleClick = useCallback(() => {
     if (!plotData) return;
@@ -616,8 +602,28 @@ const ThreeDEmbeddingsPanel = () => {
   // Min/max labels for the continuous colorscale legend
   const colorRange = useMemo(() => {
     if (activeColors?.color_scheme !== 'continuous') return null;
-    return minMax(activeColors.colors as number[]);
+    return minMax(activeColors.colors!);
   }, [activeColors]);
+
+  // Shift-clicking a legend class selects its samples (same view-stage
+  // filter as a lasso of those points)
+  const selectClass = useCallback(
+    (label: string) => {
+      if (!plotData || !activeColors?.categories) return;
+
+      const classIndex = activeColors.categories.findIndex(
+        (c) => c.label === label
+      );
+      if (classIndex < 0) return;
+
+      const ids = plotData.sample_ids.filter(
+        (_, i) => activeColors.class_indices![i] === classIndex
+      );
+      captureCamera();
+      plotSelection.handleSelected(ids);
+    },
+    [plotData, activeColors, plotSelection, captureCamera]
+  );
 
   const plotConfig = useMemo(
     () => ({
@@ -802,26 +808,39 @@ const ThreeDEmbeddingsPanel = () => {
               x={hoverPreview.x}
               y={hoverPreview.y}
               src={hoverSrc}
-              label={
-                activeColors?.labels[hoverPreview.index] ??
-                plotData.sample_ids[hoverPreview.index].slice(0, 8)
+              lines={
+                activeColors?.labels[hoverPreview.index] ?? [
+                  plotData.sample_ids[hoverPreview.index],
+                ]
               }
-              coords={[
-                plotData.x[hoverPreview.index],
-                plotData.y[hoverPreview.index],
-                plotData.z[hoverPreview.index],
-              ]}
               theme={theme}
             />
           )}
 
           {colorRange && (
-            <ColorLegend
-              label={labelSelector.label}
-              min={colorRange.min}
-              max={colorRange.max}
+            <FloatingPanel
+              stateKey="legend"
+              title={labelSelector.label ?? 'value'}
               theme={theme}
-            />
+            >
+              <ColorLegend min={colorRange.min} max={colorRange.max} />
+            </FloatingPanel>
+          )}
+
+          {activeColors?.color_scheme === 'categorical' && (
+            <FloatingPanel
+              stateKey="legend"
+              title={labelSelector.label ?? 'class'}
+              theme={theme}
+            >
+              <CategoricalLegend
+                categories={activeColors.categories!}
+                viewCounts={viewCounts}
+                highlighted={highlightedClasses ?? []}
+                onToggle={toggleHighlightedClass}
+                onSelect={selectClass}
+              />
+            </FloatingPanel>
           )}
         </>
       )}

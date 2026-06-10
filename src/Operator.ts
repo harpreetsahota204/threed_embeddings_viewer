@@ -65,7 +65,12 @@ class SetPlotColors extends Operator {
 
   async execute({ hooks, params }: any) {
     const data = params.plot_colors as PlotColors;
-    if (!data?.labels || !data?.colors) {
+    const valid =
+      data?.labels &&
+      (data.color_scheme === 'continuous'
+        ? data.colors
+        : data.categories && data.class_indices);
+    if (!valid) {
       logError('set_plot_colors: invalid payload', params);
       return;
     }
