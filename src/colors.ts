@@ -96,16 +96,20 @@ export function dimToward(
   ]);
 }
 
+// Stops pre-parsed to RGB once: viridis() runs per point on every
+// recolor, and re-parsing hex strings there is wasted work at scale
+const VIRIDIS_RGB_STOPS: Array<[number, RGB]> = VIRIDIS_STOPS.map(
+  ([t, hex]) => [t, hexToRgb(hex)]
+);
+
 /** Maps t in [0, 1] to a viridis hex color (matches plotly's Viridis) */
 function viridis(t: number): string {
   const clamped = Math.max(0, Math.min(1, t));
-  for (let i = 1; i < VIRIDIS_STOPS.length; i++) {
-    const [t1, c1] = VIRIDIS_STOPS[i];
+  for (let i = 1; i < VIRIDIS_RGB_STOPS.length; i++) {
+    const [t1, rgb1] = VIRIDIS_RGB_STOPS[i];
     if (clamped <= t1) {
-      const [t0, c0] = VIRIDIS_STOPS[i - 1];
+      const [t0, rgb0] = VIRIDIS_RGB_STOPS[i - 1];
       const f = (clamped - t0) / (t1 - t0);
-      const rgb0 = hexToRgb(c0);
-      const rgb1 = hexToRgb(c1);
       return rgbToHex([
         rgb0[0] + f * (rgb1[0] - rgb0[0]),
         rgb0[1] + f * (rgb1[1] - rgb0[1]),

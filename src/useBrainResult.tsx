@@ -18,6 +18,8 @@ export function useBrainResultsSelector() {
   const [, setColorByField] = useColorByField();
   const setPlotError = useSetRecoilState(plotErrorAtom);
 
+  const brainKeys = getBrainKeysFromDataset(dataset);
+
   const handlers = {
     onSelect(selected: string) {
       setSelected(selected);
@@ -26,7 +28,7 @@ export function useBrainResultsSelector() {
     },
     value: selected,
     useSearch: (search: string) => ({
-      values: getBrainKeysFromDataset(dataset).filter((item) =>
+      values: brainKeys.filter((item) =>
         item.toLowerCase().includes(search.toLowerCase())
       ),
     }),
@@ -35,7 +37,7 @@ export function useBrainResultsSelector() {
   return {
     handlers,
     brainKey: selected,
-    canSelect: getBrainKeysFromDataset(dataset).length > 0,
+    canSelect: brainKeys.length > 0,
     hasSelection: selected !== null,
   };
 }

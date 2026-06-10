@@ -12,7 +12,6 @@ import threading
 from collections import Counter, OrderedDict
 
 import fiftyone.operators as foo
-import fiftyone.operators.types as types
 
 _PLUGIN_URI = "@harpreetsahota/threed-embeddings"
 
@@ -67,41 +66,8 @@ class LoadVisualizationResults(foo.Operator):
             name="load_visualization_results",
             label="Load 3D Visualization Results",
             description="Load embeddings visualization from brain results",
-            dynamic=True,
             unlisted=True,
         )
-
-    def resolve_input(self, ctx):
-        inputs = types.Object()
-
-        if ctx.dataset is None:
-            return types.Property(inputs)
-
-        brain_keys = ctx.dataset.list_brain_runs(type="visualization")
-
-        if not brain_keys:
-            inputs.view(
-                "warning",
-                types.Warning(
-                    label="No visualizations found",
-                    description=(
-                        "Please compute embeddings first using "
-                        "fob.compute_visualization(dataset)"
-                    ),
-                ),
-            )
-            return types.Property(inputs)
-
-        inputs.enum(
-            "brain_key",
-            brain_keys,
-            label="Brain Key",
-            description="Select the visualization to load",
-            required=True,
-            default=brain_keys[0] if len(brain_keys) == 1 else None,
-        )
-
-        return types.Property(inputs)
 
     def execute(self, ctx):
         brain_key = ctx.params.get("brain_key")
