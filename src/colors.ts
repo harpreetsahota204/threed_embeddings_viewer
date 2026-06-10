@@ -121,10 +121,11 @@ function viridis(t: number): string {
 }
 
 /** Loop-based min/max; Math.min(...values) overflows the stack on ~100k+ */
-export function minMax(values: number[]): { min: number; max: number } {
+export function minMax(values: ArrayLike<number>): { min: number; max: number } {
   let min = Infinity;
   let max = -Infinity;
-  for (const v of values) {
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
     if (v < min) min = v;
     if (v > max) max = v;
   }
@@ -132,10 +133,14 @@ export function minMax(values: number[]): { min: number; max: number } {
 }
 
 /** Converts numeric color values to viridis hex colors */
-export function numericToColors(values: number[]): string[] {
+export function numericToColors(values: ArrayLike<number>): string[] {
   const { min, max } = minMax(values);
   const range = max - min || 1;
-  return values.map((v) => viridis((v - min) / range));
+  const out = new Array<string>(values.length);
+  for (let i = 0; i < values.length; i++) {
+    out[i] = viridis((values[i] - min) / range);
+  }
+  return out;
 }
 
 /** CSS gradient matching the viridis colorscale, for the legend overlay */

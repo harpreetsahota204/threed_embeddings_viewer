@@ -50,6 +50,38 @@ function decodeF32(b64: string): Float32Array {
   return new Float32Array(base64ToBytes(b64).buffer);
 }
 
+function decodeI32(b64: string): Int32Array {
+  return new Int32Array(base64ToBytes(b64).buffer);
+}
+
+function normalizePlotColors(raw: any): PlotColors | null {
+  if (!raw?.count || !raw.color_scheme) return null;
+
+  if (raw.color_scheme === 'continuous') {
+    if (!raw.colors_b64) return null;
+    return {
+      count: raw.count,
+      color_scheme: 'continuous',
+      colors: decodeF32(raw.colors_b64),
+    };
+  }
+
+  if (
+    !raw.categories ||
+    !raw.class_indices_b64 ||
+    !raw.class_members
+  ) {
+    return null;
+  }
+  return {
+    count: raw.count,
+    color_scheme: 'categorical',
+    categories: raw.categories,
+    class_indices: decodeI32(raw.class_indices_b64),
+    class_members: raw.class_members,
+  };
+}
+
 class SetPlotDataMeta extends Operator {
   get config() {
     return new OperatorConfig({
@@ -211,19 +243,14 @@ class SetPlotColors extends Operator {
   }
 
   async execute({ hooks, params }: any) {
-    const data = params.plot_colors as PlotColors;
-    const valid =
-      data?.labels &&
-      (data.color_scheme === 'continuous'
-        ? data.colors
-        : data.categories && data.class_indices && data.class_members);
-    if (!valid) {
+    const data = normalizePlotColors(params.plot_colors);
+    if (!data) {
       logError('set_plot_colors: invalid payload', params);
       return;
     }
 
     logInfo(
-      `colors received: ${data.labels.length.toLocaleString()} points, ` +
+      `colors received: ${data.count.toLocaleString()} points, ` +
         `${data.color_scheme}`
     );
     hooks.setPlotColors(data);

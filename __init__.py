@@ -74,6 +74,12 @@ def _encode_f32(values):
     return base64.b64encode(arr.tobytes()).decode("ascii")
 
 
+def _encode_i32(values):
+    """Encodes a 1D array as base64 little-endian int32 bytes."""
+    arr = np.ascontiguousarray(values, dtype="<i4")
+    return base64.b64encode(arr.tobytes()).decode("ascii")
+
+
 class LoadVisualizationResults(foo.Operator):
     """Stream visualization geometry from FiftyOne Brain results.
 
@@ -223,10 +229,11 @@ class GetViewSamples(foo.Operator):
         view_ids = set(ctx.view.values("id"))
 
         sample_ids = results.sample_ids
-        bitmask = bytearray((len(sample_ids) + 7) // 8)
-        for i, sample_id in enumerate(sample_ids):
-            if sample_id in view_ids:
-                bitmask[i >> 3] |= 1 << (i & 7)
+        n = len(sample_ids)
+        bitmask = bytearray((n + 7) // 8)
+        in_view = np.isin(sample_ids, list(view_ids))
+        for i in np.flatnonzero(in_view):
+            bitmask[i >> 3] |= 1 << (i & 7)
 
         return {"in_view": base64.b64encode(bytes(bitmask)).decode("ascii")}
 
@@ -244,12 +251,25 @@ def _get_index_map(results):
     return index_map
 
 
+def _field_value_at_index(dataset, results, index, field):
+    """Returns one sample's ``field`` value in brain-result order."""
+    if not 0 <= index < len(results.sample_ids):
+        return None
+    sample_id = results.sample_ids[index]
+    try:
+        values = dataset.select([sample_id]).values(field)
+        return values[0] if values else None
+    except Exception:
+        return None
+
+
 class GetSampleInfo(foo.Operator):
-    """Resolve a point index to its sample id + filepath.
+    """Resolve a point index to its sample id, filepath, and hover lines.
 
     Looked up per hover (and cached client-side) rather than shipping all
-    ids/filepaths with the plot data, which does not scale to large
-    datasets.
+    ids/filepaths/labels with the plot data, which does not scale to large
+    datasets. Optional ``color_by`` returns the same hover lines that
+    ``get_plot_colors`` used to ship for every point.
     """
 
     @property
@@ -264,12 +284,13 @@ class GetSampleInfo(foo.Operator):
     def execute(self, ctx):
         brain_key = ctx.params.get("brain_key")
         index = ctx.params.get("index")
+        color_by = ctx.params.get("color_by")
         if brain_key is None or index is None:
-            return {"sample_id": None, "filepath": None}
+            return {"sample_id": None, "filepath": None, "hover_lines": None}
 
         results = _load_brain_results(ctx.dataset, brain_key)
         if not 0 <= index < len(results.sample_ids):
-            return {"sample_id": None, "filepath": None}
+            return {"sample_id": None, "filepath": None, "hover_lines": None}
 
         sample_id = results.sample_ids[index]
         try:
@@ -278,7 +299,16 @@ class GetSampleInfo(foo.Operator):
             # Sample deleted since the brain run
             filepath = None
 
-        return {"sample_id": sample_id, "filepath": filepath}
+        hover_lines = None
+        if color_by:
+            raw = _field_value_at_index(ctx.dataset, results, index, color_by)
+            _, hover_lines = _summarize(raw)
+
+        return {
+            "sample_id": sample_id,
+            "filepath": filepath,
+            "hover_lines": hover_lines,
+        }
 
 
 class GetSampleIndices(foo.Operator):
@@ -563,22 +593,28 @@ def _compute_colors(raw_values):
     Point colors still use the dominant (mode) class, since each point can
     only have one color.
 
-    Returns a dict shaped for the frontend:
-        continuous:  {labels, colors (numbers), color_scheme}
-        categorical: {labels, categories, class_indices, class_members,
+    Returns a dict shaped for the frontend. Per-point hover lines are NOT
+    included — they are resolved lazily by ``get_sample_info``. Numeric
+    per-point arrays are base64-encoded typed buffers (not JSON lists).
+
+        continuous:  {count, colors_b64, color_scheme}
+        categorical: {count, categories, class_indices_b64, class_members,
                       color_scheme}
     """
     summaries = [_summarize(v) for v in raw_values]
     class_values = [s[0] for s in summaries]
-    hover_labels = [s[1] for s in summaries]
+    count = len(raw_values)
 
     is_numeric = any(_is_number(v) for v in class_values) and all(
         v is None or _is_number(v) for v in class_values
     )
     if is_numeric:
+        colors = np.array(
+            [v if v is not None else 0 for v in class_values], dtype="<f4"
+        )
         return {
-            "labels": hover_labels,
-            "colors": [v if v is not None else 0 for v in class_values],
+            "count": count,
+            "colors_b64": _encode_f32(colors),
             "color_scheme": "continuous",
         }
 
@@ -594,14 +630,17 @@ def _compute_colors(raw_values):
     palette = _generate_color_palette(len(ordered))
     index_map = {label: i for i, (label, _) in enumerate(ordered)}
 
+    class_indices = np.array(
+        [index_map[label] for label in dominant], dtype="<i4"
+    )
     return {
-        "labels": hover_labels,
+        "count": count,
         "color_scheme": "categorical",
         "categories": [
-            {"label": label, "color": palette[i], "count": count}
-            for i, (label, count) in enumerate(ordered)
+            {"label": label, "color": palette[i], "count": presence_count}
+            for i, (label, presence_count) in enumerate(ordered)
         ],
-        "class_indices": [index_map[label] for label in dominant],
+        "class_indices_b64": _encode_i32(class_indices),
         "class_members": [
             [index_map[label] for label in sample_labels]
             for sample_labels in members

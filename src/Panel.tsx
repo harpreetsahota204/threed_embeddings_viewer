@@ -68,12 +68,13 @@ const DEFAULT_CAMERA_2D = {
   projection: { type: 'orthographic' },
 };
 
-// Sample ids/filepaths are looked up per hover by point index (not
-// shipped with the plot data, which does not scale); cached here so each
-// point is fetched at most once. Keyed by dataset::brainKey::index.
+// Sample id, filepath, and hover lines are looked up per hover by point
+// index (not shipped with plot/colors data); cached per
+// dataset::brainKey::colorBy::index.
 interface SampleInfo {
   sampleId: string | null;
   filepath: string | null;
+  hoverLines: string[] | null;
 }
 const sampleInfoCache = new Map<string, SampleInfo>();
 
@@ -173,7 +174,7 @@ const ThreeDEmbeddingsPanel = () => {
   // or while geometry chunks are still streaming in)
   const activeColors = useMemo(() => {
     if (!plotData || !plotColors) return null;
-    return plotColors.labels.length === plotData.count ? plotColors : null;
+    return plotColors.count === plotData.count ? plotColors : null;
   }, [plotData, plotColors]);
 
   // Legend click-to-highlight: class labels whose points stay bright while
@@ -257,7 +258,12 @@ const ThreeDEmbeddingsPanel = () => {
       return numericToColors(activeColors.colors!);
     }
     const categories = activeColors.categories!;
-    return activeColors.class_indices!.map((i) => categories[i].color);
+    const indices = activeColors.class_indices!;
+    const out = new Array<string>(plotData.count);
+    for (let i = 0; i < plotData.count; i++) {
+      out[i] = categories[indices[i]].color;
+    }
+    return out;
   }, [plotData, activeColors]);
 
   const plotTraces = useMemo(() => {
@@ -766,13 +772,14 @@ const ThreeDEmbeddingsPanel = () => {
 
   useEffect(() => {
     const brainKey = brainResultSelector.brainKey;
+    const colorBy = labelSelector.label;
     if (hoverPreview === null || !plotData || !brainKey) {
       setHoverInfo(null);
       return;
     }
 
     const index = hoverPreview.index;
-    const cacheKey = `${datasetName}::${brainKey}::${index}`;
+    const cacheKey = `${datasetName}::${brainKey}::${colorBy ?? ''}::${index}`;
 
     const cached = sampleInfoCache.get(cacheKey);
     if (cached !== undefined) {
@@ -783,7 +790,11 @@ const ThreeDEmbeddingsPanel = () => {
     setHoverInfo(null);
     let stale = false;
     getSampleInfoExecutor.execute(
-      { brain_key: brainKey, index },
+      {
+        brain_key: brainKey,
+        index,
+        ...(colorBy ? { color_by: colorBy } : {}),
+      },
       {
         skipErrorNotification: true,
         callback: (result: any) => {
@@ -794,6 +805,7 @@ const ThreeDEmbeddingsPanel = () => {
           const info: SampleInfo = {
             sampleId: result?.result?.sample_id ?? null,
             filepath: result?.result?.filepath ?? null,
+            hoverLines: result?.result?.hover_lines ?? null,
           };
           sampleInfoCache.set(cacheKey, info);
           if (!stale) {
@@ -805,7 +817,13 @@ const ThreeDEmbeddingsPanel = () => {
     return () => {
       stale = true;
     };
-  }, [hoverPreview, plotData, datasetName, brainResultSelector.brainKey]);
+  }, [
+    hoverPreview,
+    plotData,
+    datasetName,
+    brainResultSelector.brainKey,
+    labelSelector.label,
+  ]);
 
   const hoverSrc = hoverInfo?.filepath
     ? (fos.getSampleSrc(hoverInfo.filepath) as string)
@@ -1026,7 +1044,7 @@ const ThreeDEmbeddingsPanel = () => {
               y={hoverPreview.y}
               src={hoverSrc}
               lines={
-                activeColors?.labels[hoverPreview.index] ??
+                hoverInfo?.hoverLines ??
                 (hoverInfo?.sampleId ? [hoverInfo.sampleId] : [])
               }
               theme={theme}

@@ -39,18 +39,17 @@ export interface PlotCategory {
 }
 
 export interface PlotColors {
-  // Per-sample hover display lines; for aggregated list fields these
-  // carry the distribution (eg ["cat: 3", "dog: 2", "5 other objects"])
-  labels: string[][];
+  count: number;
   color_scheme: 'categorical' | 'continuous';
-  // Continuous only: per-sample numeric values
-  colors?: number[];
+  // Continuous only: per-sample numeric values (base64 float32 on the wire)
+  colors?: Float32Array;
   // Categorical only: classes sorted by count desc; class_indices is each
   // sample's dominant class (drives point color), class_members is each
   // sample's full set of present classes (drives legend counts,
-  // highlighting, and class filtering)
+  // highlighting, and class filtering). Hover lines are resolved lazily
+  // via get_sample_info, not shipped here.
   categories?: PlotCategory[];
-  class_indices?: number[];
+  class_indices?: Int32Array;
   class_members?: number[][];
 }
 

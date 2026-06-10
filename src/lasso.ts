@@ -23,22 +23,43 @@ interface CameraParams {
   projection: number[];
 }
 
-// out = m * v for a column-major 4x4 matrix
-function xformMatrix(m: number[], v: number[]): number[] {
-  const out = [0, 0, 0, 0];
-  for (let i = 0; i < 4; i++) {
-    for (let j = 0; j < 4; j++) {
-      out[j] += m[4 * i + j] * v[i];
+// Column-major 4×4 multiply (gl-matrix / plotly layout)
+function mul4x4(a: number[], b: number[]): number[] {
+  const out = new Array(16);
+  for (let col = 0; col < 4; col++) {
+    for (let row = 0; row < 4; row++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) {
+        sum += a[k * 4 + row] * b[col * 4 + k];
+      }
+      out[col * 4 + row] = sum;
     }
   }
   return out;
 }
 
-function project(camera: CameraParams, v: number[]): number[] {
-  return xformMatrix(
-    camera.projection,
-    xformMatrix(camera.view, xformMatrix(camera.model, [v[0], v[1], v[2], 1]))
-  );
+function clipMatrix(camera: CameraParams): number[] {
+  return mul4x4(camera.projection, mul4x4(camera.view, camera.model));
+}
+
+// clip = M * [x, y, z, 1]; returns client coords or null if behind camera
+function toClientCoords(
+  m: number[],
+  rect: DOMRect,
+  x: number,
+  y: number,
+  z: number
+): Point2D | null {
+  const px = m[0] * x + m[4] * y + m[8] * z + m[12];
+  const py = m[1] * x + m[5] * y + m[9] * z + m[13];
+  const pw = m[3] * x + m[7] * y + m[11] * z + m[15];
+  if (pw <= 0) return null;
+
+  const invW = 0.5 / pw;
+  return {
+    x: rect.left + (0.5 + px * invW) * rect.width,
+    y: rect.top + (0.5 - py * invW) * rect.height,
+  };
 }
 
 interface SceneInternals {
@@ -61,23 +82,6 @@ function getSceneInternals(gd: any): SceneInternals | null {
   };
 }
 
-function toClient(
-  { camera, dataScale: [sx, sy, sz], rect }: SceneInternals,
-  x: number,
-  y: number,
-  z: number
-): Point2D | null {
-  const p = project(camera, [x * sx, y * sy, z * sz]);
-
-  // Behind the camera
-  if (p[3] <= 0) return null;
-
-  return {
-    x: rect.left + (0.5 + (0.5 * p[0]) / p[3]) * rect.width,
-    y: rect.top + (0.5 - (0.5 * p[1]) / p[3]) * rect.height,
-  };
-}
-
 /**
  * Maps a data point into the camera's world space — the space that
  * `scene.getCamera()`'s eye/center coordinates live in (dataScale, then
@@ -93,14 +97,16 @@ export function dataToCameraSpace(
   const glplot = scene?.glplot;
   if (!glplot?.cameraParams?.model || !scene.dataScale) return null;
 
+  const m = glplot.cameraParams.model as number[];
   const [sx, sy, sz] = scene.dataScale as number[];
-  const v = xformMatrix(glplot.cameraParams.model, [
-    x * sx,
-    y * sy,
-    z * sz,
-    1,
-  ]);
-  return [v[0] / v[3], v[1] / v[3], v[2] / v[3]];
+  const dx = x * sx;
+  const dy = y * sy;
+  const dz = z * sz;
+  const wx = m[0] * dx + m[4] * dy + m[8] * dz + m[12];
+  const wy = m[1] * dx + m[5] * dy + m[9] * dz + m[13];
+  const wz = m[2] * dx + m[6] * dy + m[10] * dz + m[14];
+  const ww = m[3] * dx + m[7] * dy + m[11] * dz + m[15];
+  return [wx / ww, wy / ww, wz / ww];
 }
 
 /** Projects a single data point to client (viewport) coordinates */
@@ -111,12 +117,19 @@ export function projectPointToClient(
   z: number
 ): Point2D | null {
   const internals = getSceneInternals(gd);
-  return internals && toClient(internals, x, y, z);
+  if (!internals) return null;
+
+  const [sx, sy, sz] = internals.dataScale;
+  const m = clipMatrix(internals.camera);
+  return toClientCoords(m, internals.rect, x * sx, y * sy, z * sz);
 }
 
 /**
  * Returns the index of the point nearest to `target` (client coordinates)
  * within `radius` pixels, or null if none is close enough.
+ *
+ * Premultiplies projection·view·model once and scans with no per-point
+ * allocations (the old path allocated ~5 objects per point).
  */
 export function pickNearestPoint(
   gd: any,
@@ -127,15 +140,40 @@ export function pickNearestPoint(
   const internals = getSceneInternals(gd);
   if (!internals) return null;
 
-  let best = -1;
-  let bestDistance = radius;
-  for (let i = 0; i < plotData.count; i++) {
-    const screen = toClient(internals, plotData.x[i], plotData.y[i], plotData.z[i]);
-    if (!screen) continue;
+  const [sx, sy, sz] = internals.dataScale;
+  const m = clipMatrix(internals.camera);
+  const { rect } = internals;
+  const radius2 = radius * radius;
+  const tx = target.x;
+  const ty = target.y;
 
-    const distance = Math.hypot(screen.x - target.x, screen.y - target.y);
-    if (distance < bestDistance) {
-      bestDistance = distance;
+  let best = -1;
+  let bestDist2 = radius2;
+
+  const xs = plotData.x;
+  const ys = plotData.y;
+  const zs = plotData.z;
+  const n = plotData.count;
+
+  for (let i = 0; i < n; i++) {
+    const dx = xs[i] * sx;
+    const dy = ys[i] * sy;
+    const dz = zs[i] * sz;
+
+    const px = m[0] * dx + m[4] * dy + m[8] * dz + m[12];
+    const py = m[1] * dx + m[5] * dy + m[9] * dz + m[13];
+    const pw = m[3] * dx + m[7] * dy + m[11] * dz + m[15];
+    if (pw <= 0) continue;
+
+    const invW = 0.5 / pw;
+    const cx = rect.left + (0.5 + px * invW) * rect.width;
+    const cy = rect.top + (0.5 - py * invW) * rect.height;
+
+    const ddx = cx - tx;
+    const ddy = cy - ty;
+    const dist2 = ddx * ddx + ddy * ddy;
+    if (dist2 < bestDist2) {
+      bestDist2 = dist2;
       best = i;
     }
   }
