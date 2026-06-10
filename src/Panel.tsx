@@ -35,9 +35,9 @@ import EmbeddingsPanelIcon from './Icon';
 import HoverCard from './HoverCard';
 import { CategoricalLegend, ColorLegend, FloatingPanel } from './Legend';
 import {
+  getProjectionParams,
   pickNearestPoint,
   projectPointToClient,
-  selectIdsInLasso,
   Point2D,
 } from './lasso';
 import { decodeBitmask, testBit } from './bitmask';
@@ -516,14 +516,19 @@ const ThreeDEmbeddingsPanel = () => {
   // since we never listen to plotly's click events, gl3d's synthetic
   // repeated clicks (emitted from its render loop while a button is held)
   // are a non-issue.
+  //
+  // The lasso is resolved server-side: only the polygon and the camera
+  // projection go over the wire, never id lists.
   const handleLassoComplete = useCallback(
     (polygon: Point2D[]) => {
       const gd = plotRef.current?.el;
       if (!gd || !plotData) return;
 
-      const ids = selectIdsInLasso(gd, plotData, polygon);
+      const projection = getProjectionParams(gd);
+      if (!projection) return;
+
       captureCamera();
-      plotSelection.handleSelected(ids);
+      plotSelection.handleLasso(polygon, projection);
     },
     [plotData, plotSelection, captureCamera]
   );
@@ -561,7 +566,7 @@ const ThreeDEmbeddingsPanel = () => {
       if (highlightedClasses?.length) {
         setHighlightedClasses([]);
       }
-      if (lassoSelection?.length) {
+      if (lassoSelection?.count) {
         clearSelection();
       }
     };
@@ -646,24 +651,16 @@ const ThreeDEmbeddingsPanel = () => {
   }, [activeColors]);
 
   // Shift-clicking a legend class selects all samples CONTAINING it
-  // (presence semantics, like sidebar label filters), applied as the same
-  // view-stage filter as a lasso of those points
+  // (presence semantics, like sidebar label filters), resolved
+  // server-side and applied as the same view-stage filter as a lasso
   const selectClass = useCallback(
     (label: string) => {
-      if (!plotData || !activeColors?.categories) return;
+      if (!labelSelector.label) return;
 
-      const classIndex = activeColors.categories.findIndex(
-        (c) => c.label === label
-      );
-      if (classIndex < 0) return;
-
-      const ids = plotData.sample_ids.filter((_, i) =>
-        activeColors.class_members![i].includes(classIndex)
-      );
       captureCamera();
-      plotSelection.handleSelected(ids);
+      plotSelection.handleClassSelect(labelSelector.label, label);
     },
-    [plotData, activeColors, plotSelection, captureCamera]
+    [labelSelector.label, plotSelection, captureCamera]
   );
 
   const plotConfig = useMemo(

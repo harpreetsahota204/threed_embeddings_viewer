@@ -11,9 +11,24 @@ import colorsys
 import threading
 from collections import Counter, OrderedDict
 
+import numpy as np
+
 import fiftyone.operators as foo
 
 _PLUGIN_URI = "@harpreetsahota/threed-embeddings"
+
+# Selections of at most this many samples are applied client-side as a
+# Select stage (read-only, like always). Larger selections are applied as
+# a dataset tag + MatchTags stage, since materializing huge id lists in a
+# view stage breaks the session/view bar/MongoDB
+_SELECTION_ID_THRESHOLD = 10000
+
+# Must match SELECTION_TAG in src/usePlotSelection.tsx
+_SELECTION_TAG = "3d-embeddings-selection"
+
+# Ids per select() batch when bulk-tagging (keeps each $in well under
+# MongoDB's command document limit)
+_TAG_WRITE_BATCH = 50000
 
 _BRAIN_RESULTS_CACHE_SIZE = 4
 _brain_results_cache = OrderedDict()
@@ -210,6 +225,183 @@ class GetSampleFilepath(foo.Operator):
             return {"filepath": None}
 
 
+class ApplySelection(foo.Operator):
+    """Resolve and apply a plot selection entirely server-side.
+
+    The frontend never materializes large id lists: lassos send the
+    polygon + camera matrices and classes send the field + label, and the
+    matching is done here against the brain results. Small selections
+    (<= ``_SELECTION_ID_THRESHOLD``) return ids for the frontend to apply
+    as a Select view stage, exactly as before. Larger selections are
+    written as a dataset tag and the frontend applies a constant-size
+    MatchTags stage instead.
+
+    Kinds:
+        lasso:  {brain_key, lasso: {polygon, camera, data_scale, rect}}
+        class:  {brain_key, color_by, label} (presence semantics)
+        toggle: {sample_id} (tag-tier selections only)
+        clear:  {} (removes the selection tag)
+
+    Returns ``{count, sample_ids}`` (small tier) or ``{count, tag}``
+    (tag tier).
+    """
+
+    @property
+    def config(self):
+        return foo.OperatorConfig(
+            name="apply_selection",
+            label="Apply Plot Selection",
+            description="Resolve and apply a 3D plot selection",
+            unlisted=True,
+        )
+
+    def execute(self, ctx):
+        kind = ctx.params.get("kind")
+
+        if kind == "clear":
+            _clear_selection_tag(ctx.dataset)
+            return {"count": 0}
+
+        if kind == "toggle":
+            return _toggle_selection_tag(
+                ctx.dataset, ctx.params.get("sample_id")
+            )
+
+        brain_key = ctx.params.get("brain_key")
+        results = _load_brain_results(ctx.dataset, brain_key)
+
+        if kind == "lasso":
+            sample_ids = _resolve_lasso(results, ctx.params.get("lasso"))
+        elif kind == "class":
+            sample_ids = _resolve_class(
+                ctx.dataset,
+                results,
+                ctx.params.get("color_by"),
+                ctx.params.get("label"),
+            )
+        else:
+            raise ValueError(f"Unknown selection kind '{kind}'")
+
+        # Any new selection supersedes a previous tag-tier selection
+        _clear_selection_tag(ctx.dataset)
+
+        count = len(sample_ids)
+        if count <= _SELECTION_ID_THRESHOLD:
+            return {"count": count, "sample_ids": sample_ids}
+
+        _write_selection_tag(ctx.dataset, sample_ids)
+        return {"count": count, "tag": _SELECTION_TAG}
+
+
+def _projection_matrix(values):
+    """Builds a numpy matrix from a column-major 4x4 matrix (gl-matrix
+    layout, as exposed by ``scene.glplot.cameraParams``) such that
+    ``matrix @ vec`` matches plotly's gl3d projection math."""
+    return np.asarray(values, dtype=float).reshape(4, 4).T
+
+
+def _resolve_lasso(results, lasso):
+    """Returns the sample ids whose projected screen positions fall
+    inside the lasso polygon.
+
+    Same math as the frontend's lasso.ts (plotly gl3d/project.js), but
+    vectorized over all points: data coords are scaled by the scene's
+    dataScale, projected through projection @ view @ model, perspective-
+    divided, and mapped into the scene container's client rect.
+    """
+    points = np.asarray(results.points, dtype=float)
+    n = len(points)
+
+    # First 3 dims are what the frontend plots; 2D renders at z=0
+    xyz = np.zeros((n, 3))
+    xyz[:, 0] = points[:, 0]
+    xyz[:, 1] = points[:, 1]
+    if points.shape[1] >= 3:
+        xyz[:, 2] = points[:, 2]
+
+    camera = lasso["camera"]
+    rect = lasso["rect"]
+    scale = np.asarray(lasso["data_scale"], dtype=float)
+
+    matrix = (
+        _projection_matrix(camera["projection"])
+        @ _projection_matrix(camera["view"])
+        @ _projection_matrix(camera["model"])
+    )
+
+    homo = np.column_stack([xyz * scale, np.ones(n)])
+    projected = homo @ matrix.T
+    w = projected[:, 3]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sx = rect["left"] + (0.5 + 0.5 * projected[:, 0] / w) * rect["width"]
+        sy = rect["top"] + (0.5 - 0.5 * projected[:, 1] / w) * rect["height"]
+
+    inside = _points_in_polygon(sx, sy, lasso["polygon"])
+    inside &= w > 0  # Behind the camera
+
+    sample_ids = results.sample_ids
+    return [sample_ids[i] for i in np.flatnonzero(inside)]
+
+
+def _points_in_polygon(x, y, polygon):
+    """Vectorized ray-casting point-in-polygon test (same semantics as
+    the frontend's pointInPolygon)."""
+    inside = np.zeros(len(x), dtype=bool)
+    vertices = [(float(p["x"]), float(p["y"])) for p in polygon]
+
+    j = len(vertices) - 1
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for i in range(len(vertices)):
+            xi, yi = vertices[i]
+            xj, yj = vertices[j]
+            crosses = (yi > y) != (yj > y)
+            # Where crosses is False the division may be inf/nan; the
+            # comparison is then False, matching the scalar short-circuit
+            xcross = (xj - xi) * (y - yi) / (yj - yi) + xi
+            inside ^= crosses & (x < xcross)
+            j = i
+
+    return inside
+
+
+def _resolve_class(dataset, results, color_by, label):
+    """Returns the brain-run sample ids whose ``color_by`` value CONTAINS
+    ``label`` (presence semantics, matching the legend counts)."""
+    ids, values = dataset.values(["id", color_by])
+    values_by_id = dict(zip(ids, values))
+
+    return [
+        _id
+        for _id in results.sample_ids
+        if label in _presence_labels(values_by_id.get(_id))
+    ]
+
+
+def _clear_selection_tag(dataset):
+    dataset.match_tags(_SELECTION_TAG).untag_samples(_SELECTION_TAG)
+
+
+def _write_selection_tag(dataset, sample_ids):
+    # Batched so each select() pipeline stays well under MongoDB's
+    # command document limit
+    for start in range(0, len(sample_ids), _TAG_WRITE_BATCH):
+        batch = sample_ids[start : start + _TAG_WRITE_BATCH]
+        dataset.select(batch).tag_samples(_SELECTION_TAG)
+
+
+def _toggle_selection_tag(dataset, sample_id):
+    """Adds/removes one sample from a tag-tier selection."""
+    sample = dataset[sample_id]
+    if _SELECTION_TAG in sample.tags:
+        dataset.select([sample_id]).untag_samples(_SELECTION_TAG)
+    else:
+        dataset.select([sample_id]).tag_samples(_SELECTION_TAG)
+
+    count = dataset.match_tags(_SELECTION_TAG).count()
+    return {"count": count, "tag": _SELECTION_TAG}
+
+
 def _compute_colors(raw_values):
     """Computes the plot colors payload from per-sample raw field values,
     given in brain-result order.
@@ -357,3 +549,4 @@ def register(plugin):
     plugin.register(GetPlotColors)
     plugin.register(GetViewSamples)
     plugin.register(GetSampleFilepath)
+    plugin.register(ApplySelection)

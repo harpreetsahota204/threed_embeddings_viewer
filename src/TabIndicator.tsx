@@ -20,11 +20,11 @@ export default function ThreeDEmbeddingsTabIndicator() {
   // detected even while the panel is hidden (the tab stays mounted)
   useLassoStageWatchdog();
 
-  if (!selection?.length) return null;
+  if (!selection?.count) return null;
 
   return (
     <FilterAndSelectionIndicator
-      selectionCount={selection.length.toString()}
+      selectionCount={selection.count.toLocaleString()}
       onClickSelection={clearSelection}
     />
   );

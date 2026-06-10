@@ -62,9 +62,17 @@ export const plotErrorAtom = atom<string | null>({
   default: null,
 });
 
+export interface LassoSelection {
+  count: number;
+  // Present only for small selections (applied as a Select stage); null
+  // for large selections, which are server-side (tag + MatchTags stage)
+  // so that huge id lists never live in client state or view stages
+  ids: string[] | null;
+}
+
 // Lasso selection state lives in plain atoms (not panel state) because the
 // panel tab indicator renders outside of the panel context
-export const lassoSelectionAtom = atom<string[] | null>({
+export const lassoSelectionAtom = atom<LassoSelection | null>({
   key: 'threed-embeddings-lasso-selection',
   default: null,
 });

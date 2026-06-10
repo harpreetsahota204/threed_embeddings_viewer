@@ -12,6 +12,7 @@ operators:
   - get_plot_colors
   - get_view_samples
   - get_sample_filepath
+  - apply_selection
 
 # TypeScript/React panels
 panels:
