@@ -11,7 +11,7 @@ import {
 } from '@fiftyone/operators';
 import { useSetRecoilState } from 'recoil';
 import { plotDataAtom, plotErrorAtom, PlotData } from './State';
-import { log, logError } from './logger';
+import { logError } from './logger';
 
 class SetPlotData extends Operator {
   get config() {
@@ -37,9 +37,6 @@ class SetPlotData extends Operator {
       return;
     }
 
-    log(
-      `set_plot_data: received ${data.x.length} pts, scheme=${data.color_scheme}`
-    );
     hooks.setPlotData(data);
     hooks.setPlotError(null);
   }

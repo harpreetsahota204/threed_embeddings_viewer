@@ -1,6 +1,6 @@
 /**
- * Keeps plotSelection in sync with the current view/filters so that
- * out-of-view points are dimmed in the 3D plot.
+ * Keeps the viewSelection panel state in sync with the current
+ * view/filters so that out-of-view points are dimmed in the 3D plot.
  */
 
 import { useEffect } from "react";
@@ -10,7 +10,6 @@ import { usePanelStatePartial } from "@fiftyone/spaces";
 import { useOperatorExecutor } from "@fiftyone/operators";
 import { useBrainResult } from "./useBrainResult";
 import { plotDataAtom } from "./State";
-import { log } from "./logger";
 
 export function useSelectionEffect() {
   const datasetName = useRecoilValue(fos.datasetName);
@@ -33,30 +32,17 @@ export function useSelectionEffect() {
     const hasViewStages = view && view.length > 0;
 
     if (!hasFilters && !hasViewStages) {
-      log("selection effect: no filters/stages; clearing dimming set");
       setViewSelection(null);
       return;
     }
 
-    log(
-      `selection effect: fetching view samples (filters=${
-        Object.keys(filters || {}).length
-      }, stages=${view?.length ?? 0})`
-    );
-
     // The execute() promise does not resolve with the result; results
     // must be read via the callback option
-    const t0 = performance.now();
     getViewSamplesExecutor.execute(
       { brain_key: brainKey },
       {
         callback: (result: any) => {
           const ids = result?.result?.sample_ids;
-          log(
-            `get_view_samples: ${ids?.length ?? 0} ids in ${(
-              performance.now() - t0
-            ).toFixed(0)}ms`
-          );
           setViewSelection(ids?.length ? ids : null);
         },
       }

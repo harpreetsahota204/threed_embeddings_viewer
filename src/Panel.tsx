@@ -17,7 +17,6 @@ import { useBrainResultsSelector } from './useBrainResult';
 import { useLabelSelector } from './useLabelSelector';
 import { usePlotSelection } from './usePlotSelection';
 import { usePlot } from './usePlot';
-import { useDebugLogging } from './useDebugLogging';
 import LassoOverlay from './LassoOverlay';
 import TabIndicator from './TabIndicator';
 import { selectIdsInLasso, projectPointToClient, Point2D } from './lasso';
@@ -26,7 +25,6 @@ import {
   numericToColors,
   VIRIDIS_CSS_GRADIENT,
 } from './colors';
-import { log } from './logger';
 import './Operator';
 
 const SELECTED_COLOR = '#ff9800';
@@ -73,7 +71,6 @@ const ThreeDEmbeddingsPanel = () => {
   const labelSelector = useLabelSelector();
   const plotSelection = usePlotSelection();
   const { plotData, plotError } = usePlot();
-  useDebugLogging();
   const selectedSamples = useRecoilValue(fos.selectedSamples) as Set<string>;
   const [lassoActive, setLassoActive] = useState(false);
   // Bumping this value resets the camera to the layout default (uirevision).
@@ -113,7 +110,6 @@ const ThreeDEmbeddingsPanel = () => {
   const plotTraces = useMemo(() => {
     if (!plotData) return [];
 
-    const t0 = performance.now();
     const resolvedSelection = plotSelection.resolvedSelection;
 
     // scatter3d does not support selectedpoints/selected/unselected, so
@@ -189,15 +185,6 @@ const ThreeDEmbeddingsPanel = () => {
         }
       });
     }
-
-    // Each recompute makes plotly rebuild the WebGL scene, so this should
-    // only fire when data or selection actually changes
-    log(
-      `plotTraces rebuilt: ${plotData.x.length} pts,`,
-      `selection=${resolvedSelection?.length ?? 'none'},`,
-      `checked=${selectedSamples.size},`,
-      `${(performance.now() - t0).toFixed(1)}ms`
-    );
 
     return [
       {
@@ -293,6 +280,16 @@ const ThreeDEmbeddingsPanel = () => {
   const clickGateRef = useRef(0);
   const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
 
+  // Thumbnail preview of the hovered sample, positioned next to the
+  // projected point in viewport coordinates. Mirrored in a ref so the
+  // pointer-move handler can read it without re-subscribing.
+  const [hoverPreview, setHoverPreview] = useState<{
+    index: number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const hoverPreviewRef = useRef<typeof hoverPreview>(null);
+
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     pointerDownRef.current = { x: e.clientX, y: e.clientY };
     clickGateRef.current = performance.now();
@@ -304,6 +301,23 @@ const ThreeDEmbeddingsPanel = () => {
       // It's a drag (camera rotation), not a click
       clickGateRef.current = 0;
     }
+
+    // gl3d's unhover event comes from its render loop and is unreliable
+    // when moving onto empty space, so clear the thumbnail ourselves once
+    // the pointer is no longer near the hovered point
+    const preview = hoverPreviewRef.current;
+    if (
+      preview &&
+      Math.hypot(e.clientX - preview.x, e.clientY - preview.y) > 28
+    ) {
+      hoverPreviewRef.current = null;
+      setHoverPreview(null);
+    }
+  }, []);
+
+  const handlePointerLeave = useCallback(() => {
+    hoverPreviewRef.current = null;
+    setHoverPreview(null);
   }, []);
 
   const handleClick = useCallback(
@@ -320,7 +334,6 @@ const ThreeDEmbeddingsPanel = () => {
       clickGateRef.current = 0; // consume: one click per gesture
 
       const sampleId = plotData.sample_ids[point.pointNumber];
-      log('point clicked:', sampleId);
       captureCamera();
       plotSelection.handleSelected([sampleId]);
     },
@@ -333,13 +346,7 @@ const ThreeDEmbeddingsPanel = () => {
       const gd = plotRef.current?.el;
       if (!gd || !plotData) return;
 
-      const t0 = performance.now();
       const ids = selectIdsInLasso(gd, plotData, polygon);
-      log(
-        `lasso complete: polygon=${polygon.length} vertices,`,
-        `matched=${ids.length}/${plotData.sample_ids.length} pts,`,
-        `${(performance.now() - t0).toFixed(1)}ms`
-      );
       captureCamera();
       plotSelection.handleSelected(ids);
     },
@@ -347,14 +354,6 @@ const ThreeDEmbeddingsPanel = () => {
   );
 
   const handleLassoCancel = useCallback(() => setLassoActive(false), []);
-
-  // Thumbnail preview of the hovered sample, positioned next to the
-  // projected point in viewport coordinates
-  const [hoverPreview, setHoverPreview] = useState<{
-    index: number;
-    x: number;
-    y: number;
-  } | null>(null);
 
   const handleHover = useCallback(
     (event: any) => {
@@ -371,15 +370,18 @@ const ThreeDEmbeddingsPanel = () => {
         plotData.z[i]
       );
       if (pos) {
-        setHoverPreview((prev) =>
-          prev?.index === i ? prev : { index: i, x: pos.x, y: pos.y }
-        );
+        const preview = { index: i, x: pos.x, y: pos.y };
+        hoverPreviewRef.current = preview;
+        setHoverPreview((prev) => (prev?.index === i ? prev : preview));
       }
     },
     [lassoActive, plotData]
   );
 
-  const handleUnhover = useCallback(() => setHoverPreview(null), []);
+  const handleUnhover = useCallback(() => {
+    hoverPreviewRef.current = null;
+    setHoverPreview(null);
+  }, []);
 
   const hoverSrc = useMemo(() => {
     if (hoverPreview === null || !plotData?.filepaths) return null;
@@ -433,6 +435,7 @@ const ThreeDEmbeddingsPanel = () => {
       }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
+      onPointerLeave={handlePointerLeave}
     >
       {/* Floating controls, styled like the 2D embeddings panel */}
       <div

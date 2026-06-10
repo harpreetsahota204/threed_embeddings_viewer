@@ -7,7 +7,6 @@ import {
 import * as fos from "@fiftyone/state";
 import { usePanelStatePartial } from "@fiftyone/spaces";
 import { lassoSelectionAtom, lassoStageIdAtom } from "./State";
-import { log } from "./logger";
 
 const SELECT_STAGE_CLS = "fiftyone.core.stages.Select";
 
@@ -41,16 +40,10 @@ export function useClearLassoSelection() {
   const setLassoSelection = useSetRecoilState(lassoSelectionAtom);
 
   return useCallback(() => {
-    const remaining = (view || []).filter((s) => s?._uuid !== stageId);
-    log(
-      `clearSelection: removing stage ${stageId ?? "none"},`,
-      `view ${(view || []).length} -> ${remaining.length} stages,`,
-      `checked=${selectedSamples.size}`
-    );
     setLassoSelection(null);
     if (stageId) {
       setStageId(null);
-      setView(remaining);
+      setView((view || []).filter((s) => s?._uuid !== stageId));
     }
     if (selectedSamples.size > 0) {
       setSelectedSamples(new Set());
@@ -65,9 +58,8 @@ export function useClearLassoSelection() {
  *
  * Tracks the specific uuid that has been observed in the view: setView
  * propagates asynchronously, so right after a lasso replaces the stage,
- * the view still briefly contains the OLD uuid. A boolean "armed" flag
- * here caused replaced stages to be misread as external removals,
- * orphaning the in-flight stage.
+ * the view still briefly contains the OLD uuid. Only a stage that has
+ * been observed in the view and is then missing was removed externally.
  */
 export function useLassoStageWatchdog() {
   const view = useRecoilValue(fos.view) as any[];
@@ -83,19 +75,11 @@ export function useLassoStageWatchdog() {
 
     const present = (view || []).some((stage) => stage?._uuid === stageId);
     if (present) {
-      if (armedStageRef.current !== stageId) {
-        log(`lasso stage ${stageId} observed in view (armed)`);
-      }
       armedStageRef.current = stageId;
     } else if (armedStageRef.current === stageId) {
-      log(
-        `lasso stage ${stageId} removed from view externally; clearing selection`
-      );
       armedStageRef.current = null;
       setStageId(null);
       setLassoSelection(null);
-    } else {
-      log(`lasso stage ${stageId} not yet in view (waiting for propagation)`);
     }
   }, [view, stageId]);
 }
@@ -125,9 +109,6 @@ export function usePlotSelection() {
   // Drop stale selection state when the dataset changes
   useEffect(() => {
     if (lastDataset !== null && lastDataset !== datasetName) {
-      log(
-        `dataset changed (${lastDataset} -> ${datasetName}); clearing lasso state`
-      );
       setLassoSelection(null);
       setStageId(null);
     }
@@ -135,7 +116,6 @@ export function usePlotSelection() {
   }, [datasetName]);
 
   function handleSelected(selectedResults: string[]) {
-    log("handleSelected:", selectedResults.length, "ids");
     if (selectedResults.length === 0) {
       clearSelection();
       return;
@@ -153,51 +133,39 @@ export function usePlotSelection() {
       setSelectedSamples(new Set());
     }
 
-    const uuid = newStageId();
     const stage = {
       _cls: SELECT_STAGE_CLS,
       kwargs: [
         ["sample_ids", selectedResults],
         ["ordered", false],
       ],
-      _uuid: uuid,
+      _uuid: newStageId(),
     };
 
     const otherStages = (view || []).filter((s) => s?._uuid !== stageId);
-    log(
-      `applying Select stage ${uuid} (${selectedResults.length} ids),`,
-      `replacing ${stageId ?? "none"},`,
-      `view ${(view || []).length} -> ${otherStages.length + 1} stages`
-    );
     setLassoSelection(selectedResults);
-    setStageId(uuid);
+    setStageId(stage._uuid);
     setView([...otherStages, stage]);
   }
 
   // Memoized so that the trace memo in Panel only invalidates when the
-  // selection actually changes
-  const { resolvedSelection, selectionStyle } = useMemo(() => {
-    // Selection priority: checked samples > lasso selection > view filtering
+  // selection actually changes.
+  // Selection priority: checked samples > lasso selection > view filtering
+  const resolvedSelection = useMemo(() => {
     if (selectedSamples.size) {
-      return {
-        resolvedSelection: Array.from(selectedSamples),
-        selectionStyle: "selected",
-      };
+      return Array.from(selectedSamples);
     }
     if (lassoSelection?.length) {
-      return { resolvedSelection: lassoSelection, selectionStyle: "lasso" };
+      return lassoSelection;
     }
     if (viewSelection?.length) {
-      return { resolvedSelection: viewSelection, selectionStyle: "plot" };
+      return viewSelection;
     }
-    return { resolvedSelection: null, selectionStyle: null };
+    return null;
   }, [selectedSamples, lassoSelection, viewSelection]);
 
   return {
     handleSelected,
-    clearSelection,
     resolvedSelection,
-    hasSelection: resolvedSelection !== null,
-    selectionStyle,
   };
 }

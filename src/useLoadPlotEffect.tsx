@@ -5,7 +5,6 @@ import { useOperatorExecutor } from "@fiftyone/operators";
 import { useBrainResult } from "./useBrainResult";
 import { useColorByField } from "./useLabelSelector";
 import { plotDataAtom, plotErrorAtom } from "./State";
-import { log } from "./logger";
 
 // Module-level so it survives panel remounts: the App reloads the page query
 // on server "refresh" events, which remounts the panel subtree. A useRef here
@@ -61,17 +60,8 @@ export function useLoadPlotEffect() {
       params.color_by = labelField;
     }
 
-    log("load_visualization_results: executing", params);
-    const t0 = performance.now();
     executor.execute(params, {
       callback: (result: any) => {
-        log(
-          `load_visualization_results: done in ${(
-            performance.now() - t0
-          ).toFixed(0)}ms,`,
-          "error:",
-          result?.error ?? null
-        );
         if (result?.error) {
           // Allow a retry after failures
           requestedSource = null;
