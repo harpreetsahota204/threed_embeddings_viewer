@@ -107,6 +107,35 @@ export function projectPointToClient(
 }
 
 /**
+ * Returns the index of the point nearest to `target` (client coordinates)
+ * within `radius` pixels, or null if none is close enough.
+ */
+export function pickNearestPoint(
+  gd: any,
+  plotData: PlotData,
+  target: Point2D,
+  radius = 12
+): number | null {
+  const internals = getSceneInternals(gd);
+  if (!internals) return null;
+
+  let best = -1;
+  let bestDistance = radius;
+  for (let i = 0; i < plotData.sample_ids.length; i++) {
+    const screen = toClient(internals, plotData.x[i], plotData.y[i], plotData.z[i]);
+    if (!screen) continue;
+
+    const distance = Math.hypot(screen.x - target.x, screen.y - target.y);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = i;
+    }
+  }
+
+  return best >= 0 ? best : null;
+}
+
+/**
  * Returns the sample IDs whose projected screen positions fall inside the
  * polygon, which must be given in client (viewport) coordinates.
  */

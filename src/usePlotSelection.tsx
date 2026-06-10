@@ -7,6 +7,7 @@ import {
 import * as fos from "@fiftyone/state";
 import { usePanelStatePartial } from "@fiftyone/spaces";
 import { lassoSelectionAtom, lassoStageIdAtom } from "./State";
+import { log } from "./logger";
 
 const SELECT_STAGE_CLS = "fiftyone.core.stages.Select";
 
@@ -148,6 +149,21 @@ export function usePlotSelection() {
     setView([...otherStages, stage]);
   }
 
+  // Adds/removes a single point from the current selection (select mode
+  // click). Clearing the last point clears the whole selection.
+  function toggleSelected(sampleId: string) {
+    const current = lassoSelection ?? [];
+    const removing = current.includes(sampleId);
+    const next = removing
+      ? current.filter((id: string) => id !== sampleId)
+      : [...current, sampleId];
+    log(
+      `select mode: ${removing ? "removed" : "added"} point ${sampleId},`,
+      `selection now ${next.length} ids`
+    );
+    handleSelected(next);
+  }
+
   // Memoized so that the trace memo in Panel only invalidates when the
   // selection actually changes.
   // Selection priority: checked samples > lasso selection > view filtering
@@ -166,6 +182,7 @@ export function usePlotSelection() {
 
   return {
     handleSelected,
+    toggleSelected,
     resolvedSelection,
   };
 }

@@ -17,22 +17,33 @@ import React, {
 import { registerComponent, PluginComponentType } from '@fiftyone/plugins';
 import { Selector, useTheme } from '@fiftyone/components';
 import { useOperatorExecutor } from '@fiftyone/operators';
+import { usePanelStatePartial } from '@fiftyone/spaces';
 import * as fos from '@fiftyone/state';
 import { useRecoilValue } from 'recoil';
 import Plot from 'react-plotly.js';
 import { useBrainResultsSelector } from './useBrainResult';
 import { useLabelSelector } from './useLabelSelector';
-import { usePlotSelection } from './usePlotSelection';
+import {
+  useClearLassoSelection,
+  usePlotSelection,
+} from './usePlotSelection';
 import { usePlot } from './usePlot';
 import LassoOverlay from './LassoOverlay';
 import TabIndicator from './TabIndicator';
-import { selectIdsInLasso, projectPointToClient, Point2D } from './lasso';
+import {
+  pickNearestPoint,
+  projectPointToClient,
+  selectIdsInLasso,
+  Point2D,
+} from './lasso';
 import {
   dimToward,
   minMax,
   numericToColors,
   VIRIDIS_CSS_GRADIENT,
 } from './colors';
+import { lassoSelectionAtom } from './State';
+import { log } from './logger';
 import './Operator';
 
 const SELECTED_COLOR = '#ff9800';
@@ -85,7 +96,34 @@ const ThreeDEmbeddingsPanel = () => {
   const plotSelection = usePlotSelection();
   const { plotData, plotColors, plotError } = usePlot();
   const selectedSamples = useRecoilValue(fos.selectedSamples) as Set<string>;
-  const [lassoActive, setLassoActive] = useState(false);
+  const lassoSelection = useRecoilValue(lassoSelectionAtom);
+  const clearSelection = useClearLassoSelection();
+
+  // Explore mode (default): orbit/zoom/hover, grab cursor, clicks inert.
+  // Select mode: pointer cursor, click toggles a point, drag lassos.
+  // Double-click switches between the two. Stored in panel state (not
+  // useState) so deferred page-query reloads, which remount the panel,
+  // don't silently kick the user back to explore mode.
+  const [selectMode, setSelectModeRaw] = usePanelStatePartial(
+    'selectMode',
+    false,
+    true
+  );
+  const setSelectMode = useCallback(
+    (active: boolean, source: string) => {
+      log(`mode: ${active ? 'select' : 'explore'} (via ${source})`);
+      setSelectModeRaw(active);
+    },
+    [setSelectModeRaw]
+  );
+
+  // Mount logging: panel remounts (page-query reloads) reset any
+  // component-local state, so knowing when they happen is essential when
+  // debugging the interaction model
+  useEffect(() => {
+    log('panel mounted');
+    return () => log('panel unmounted');
+  }, []);
   // Bumping this value resets the camera to the layout default (uirevision).
   // Must be truthy: plotly treats a falsy uirevision as "no revision" and
   // resets the camera on every data update.
@@ -153,9 +191,6 @@ const ThreeDEmbeddingsPanel = () => {
       baseColors = activeColors.colors as string[];
     }
 
-    // Hover text: the color-by value, or a shortened sample id
-    const text =
-      activeColors?.labels ?? plotData.sample_ids.map((s) => s.slice(0, 8));
 
     // NB: scatter3d halves array sizes relative to scalar sizes (array
     // values go through bubble-chart diameter scaling in
@@ -231,10 +266,9 @@ const ThreeDEmbeddingsPanel = () => {
         x: plotData.x,
         y: plotData.y,
         z: plotData.z,
-        text,
         marker: { color: colors, size: sizes, opacity: 0.85 },
-        hovertemplate:
-          '<b>%{text}</b><br>x: %{x:.3f}<br>y: %{y:.3f}<br>z: %{z:.3f}<extra></extra>',
+        // Hover is rendered by our own card via pointer-move picking
+        hoverinfo: 'skip',
         showlegend: false,
       },
     ];
@@ -261,7 +295,7 @@ const ThreeDEmbeddingsPanel = () => {
         camera: savedCamera || DEFAULT_CAMERA,
         bgcolor: 'rgba(0,0,0,0)',
       },
-      hovermode: 'closest',
+      hovermode: false,
       paper_bgcolor: 'rgba(0,0,0,0)',
       plot_bgcolor: 'rgba(0,0,0,0)',
     }),
@@ -299,118 +333,152 @@ const ThreeDEmbeddingsPanel = () => {
     setCameraRev((rev) => rev + 1);
   }, []);
 
-  // plotly gl3d emits plotly_click from its render loop whenever a mouse
-  // button is held over a point — NOT once per DOM click. Since our click
-  // handler triggers a re-render, naively handling every event creates an
-  // infinite click->render->click feedback loop that freezes the app. The
-  // gate below arms on pointerdown, disarms on drag, and is consumed by
-  // the first click event, so exactly one click per real gesture is
-  // honored.
-  const clickGateRef = useRef(0);
-  const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
-
-  // Thumbnail preview of the hovered sample, positioned next to the
-  // projected point in viewport coordinates. Mirrored in a ref so the
-  // pointer-move handler can read it without re-subscribing.
+  // Hover card for the pointed-at sample, positioned next to the
+  // projected point in viewport coordinates. Hover is implemented with
+  // our own nearest-point picking on pointer move (NOT plotly's hover
+  // events, which come from the gl3d render loop, miss unhovers, and
+  // don't fire at all under the select-mode overlay) — so it works
+  // identically in both modes.
   const [hoverPreview, setHoverPreview] = useState<{
     index: number;
     x: number;
     y: number;
   } | null>(null);
   const hoverPreviewRef = useRef<typeof hoverPreview>(null);
+  const lastHoverPickRef = useRef(0);
 
-  const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    pointerDownRef.current = { x: e.clientX, y: e.clientY };
-    clickGateRef.current = performance.now();
-  }, []);
-
-  const handlePointerMove = useCallback((e: React.PointerEvent) => {
-    const down = pointerDownRef.current;
-    if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) {
-      // It's a drag (camera rotation), not a click
-      clickGateRef.current = 0;
-    }
-
-    // gl3d's unhover event comes from its render loop and is unreliable
-    // when moving onto empty space, so clear the thumbnail ourselves once
-    // the pointer is no longer near the hovered point
-    const preview = hoverPreviewRef.current;
-    if (
-      preview &&
-      Math.hypot(e.clientX - preview.x, e.clientY - preview.y) > 28
-    ) {
+  const clearHover = useCallback(() => {
+    if (hoverPreviewRef.current !== null) {
       hoverPreviewRef.current = null;
       setHoverPreview(null);
     }
   }, []);
 
-  const handlePointerLeave = useCallback(() => {
-    hoverPreviewRef.current = null;
-    setHoverPreview(null);
-  }, []);
+  const handlePointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      // No hover while a button is held (rotating or drawing a lasso)
+      if (e.buttons !== 0) {
+        clearHover();
+        return;
+      }
 
-  const handleClick = useCallback(
-    (event: any) => {
-      if (lassoActive || !plotData) return;
+      // Throttle picking; it's O(points)
+      const now = performance.now();
+      if (now - lastHoverPickRef.current < 50) return;
+      lastHoverPickRef.current = now;
 
-      // The halo trace has hoverinfo skip; only the main trace (index 1)
-      // produces points
-      const point = event?.points?.find((p: any) => p.curveNumber === 1);
-      if (!point) return;
+      const gd = plotRef.current?.el;
+      if (!gd || !plotData) return;
 
-      const gate = clickGateRef.current;
-      if (!gate || performance.now() - gate > 500) return;
-      clickGateRef.current = 0; // consume: one click per gesture
+      const index = pickNearestPoint(
+        gd,
+        plotData,
+        { x: e.clientX, y: e.clientY },
+        16
+      );
+      if (index === null) {
+        clearHover();
+        return;
+      }
 
-      const sampleId = plotData.sample_ids[point.pointNumber];
-      captureCamera();
-      plotSelection.handleSelected([sampleId]);
+      if (hoverPreviewRef.current?.index !== index) {
+        const pos = projectPointToClient(
+          gd,
+          plotData.x[index],
+          plotData.y[index],
+          plotData.z[index]
+        );
+        if (pos) {
+          const preview = { index, x: pos.x, y: pos.y };
+          hoverPreviewRef.current = preview;
+          setHoverPreview(preview);
+        }
+      }
     },
-    [lassoActive, plotData, plotSelection, captureCamera]
+    [plotData, clearHover]
   );
 
+  const handlePointerLeave = useCallback(() => clearHover(), [clearHover]);
+
+  // Selection only happens in select mode, through the overlay: a drag
+  // lassos a region (replacing the selection), a click toggles the nearest
+  // point. Exploration (orbit/hover) can never select accidentally — and
+  // since we never listen to plotly's click events, gl3d's synthetic
+  // repeated clicks (emitted from its render loop while a button is held)
+  // are a non-issue.
   const handleLassoComplete = useCallback(
     (polygon: Point2D[]) => {
-      setLassoActive(false);
       const gd = plotRef.current?.el;
       if (!gd || !plotData) return;
 
       const ids = selectIdsInLasso(gd, plotData, polygon);
+      log(
+        `select mode: lasso matched ${ids.length}/${plotData.sample_ids.length} points`
+      );
       captureCamera();
       plotSelection.handleSelected(ids);
     },
     [plotData, plotSelection, captureCamera]
   );
 
-  const handleLassoCancel = useCallback(() => setLassoActive(false), []);
+  const handlePick = useCallback(
+    (point: Point2D) => {
+      const gd = plotRef.current?.el;
+      if (!gd || !plotData) return;
 
-  const handleHover = useCallback(
-    (event: any) => {
-      if (lassoActive || !plotData) return;
-
-      const point = event?.points?.find((p: any) => p.curveNumber === 1);
-      if (!point) return;
-
-      const i = point.pointNumber;
-      const pos = projectPointToClient(
-        plotRef.current?.el,
-        plotData.x[i],
-        plotData.y[i],
-        plotData.z[i]
-      );
-      if (pos) {
-        const preview = { index: i, x: pos.x, y: pos.y };
-        hoverPreviewRef.current = preview;
-        setHoverPreview((prev) => (prev?.index === i ? prev : preview));
+      const index = pickNearestPoint(gd, plotData, point);
+      if (index === null) {
+        log('select mode: click on empty space (no point within radius)');
+        return; // keep mode, change nothing
       }
+
+      captureCamera();
+      plotSelection.toggleSelected(plotData.sample_ids[index]);
     },
-    [lassoActive, plotData]
+    [plotData, plotSelection, captureCamera]
   );
 
-  const handleUnhover = useCallback(() => {
-    hoverPreviewRef.current = null;
-    setHoverPreview(null);
-  }, []);
+  const handleSelectModeExit = useCallback(
+    () => setSelectMode(false, 'Esc/double-click'),
+    [setSelectMode]
+  );
+
+  // Esc in explore mode clears the selection and grid filtering (the 2D
+  // embeddings panel behavior). In select mode, Esc exits the mode first
+  // (handled by the overlay); the next Esc then clears.
+  useEffect(() => {
+    if (selectMode) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && lassoSelection?.length) {
+        log(`explore mode: Esc pressed, clearing selection (${lassoSelection.length} ids)`);
+        clearSelection();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectMode, lassoSelection, clearSelection]);
+
+  const handleExploreDoubleClick = useCallback(() => {
+    if (!plotData) return;
+    setSelectMode(true, 'double-click');
+  }, [plotData, setSelectMode]);
+
+  // Grab-hand cursor animates to "grabbing" while rotating the scene
+  const [grabbing, setGrabbing] = useState(false);
+  useEffect(() => {
+    if (!grabbing) return;
+    const onUp = () => setGrabbing(false);
+    window.addEventListener('pointerup', onUp);
+    return () => window.removeEventListener('pointerup', onUp);
+  }, [grabbing]);
+
+  const getCanvas = useCallback(
+    () =>
+      (plotRef.current?.el?._fullLayout?.scene?._scene?.glplot?.canvas ??
+        null) as HTMLCanvasElement | null,
+    []
+  );
 
   // Resolve the hovered sample's filepath lazily (one tiny request per
   // first hover, cached afterwards)
@@ -498,7 +566,6 @@ const ThreeDEmbeddingsPanel = () => {
         // No background: inherit the spaces panel background, exactly
         // like the 2D embeddings panel
       }}
-      onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
     >
@@ -545,11 +612,11 @@ const ThreeDEmbeddingsPanel = () => {
           {plotData && (
             <>
               <button
-                onClick={() => setLassoActive((active) => !active)}
-                style={plotOptionStyle(lassoActive)}
-                title="Draw a lasso around points to select them (Esc to cancel)"
+                onClick={() => setSelectMode(!selectMode, 'button')}
+                style={plotOptionStyle(selectMode)}
+                title="Double-click the plot to switch modes. Select mode: click points to toggle them, drag to lasso a region (Esc to exit)"
               >
-                Lasso
+                {selectMode ? 'Selecting' : 'Select'}
               </button>
 
               <button
@@ -608,47 +675,90 @@ const ThreeDEmbeddingsPanel = () => {
 
       {!plotError && plotData && (
         <>
-          <Plot
-            ref={plotRef}
-            data={plotTraces as any}
-            layout={plotLayout as any}
-            config={plotConfig}
-            style={plotStyle}
-            onClick={handleClick}
-            onRelayout={handleRelayout}
-            onHover={handleHover}
-            onUnhover={handleUnhover}
-            useResizeHandler={true}
-          />
-          {lassoActive && (
+          {/* Explore mode: grab cursor (grabbing while rotating);
+              double-click enters select mode */}
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              cursor: grabbing ? 'grabbing' : 'grab',
+            }}
+            onDoubleClick={handleExploreDoubleClick}
+            onPointerDown={() => setGrabbing(true)}
+          >
+            <Plot
+              ref={plotRef}
+              data={plotTraces as any}
+              layout={plotLayout as any}
+              config={plotConfig}
+              style={plotStyle}
+              onRelayout={handleRelayout}
+              useResizeHandler={true}
+            />
+          </div>
+          {selectMode && (
             <LassoOverlay
               onComplete={handleLassoComplete}
-              onCancel={handleLassoCancel}
+              onPick={handlePick}
+              onToggleMode={handleSelectModeExit}
+              onCancel={handleSelectModeExit}
+              getCanvas={getCanvas}
             />
           )}
 
-          {/* Hovered sample thumbnail */}
-          {hoverSrc && hoverPreview && !lassoActive && (
-            <img
-              key={hoverSrc}
-              src={hoverSrc}
+          {/* Hover card: thumbnail + color-by value + coordinates (works
+              in both explore and select modes) */}
+          {hoverPreview && (
+            <div
               style={{
                 position: 'fixed',
                 left: hoverPreview.x + 16,
                 top: hoverPreview.y + 16,
-                width: 120,
-                height: 120,
-                objectFit: 'cover',
+                width: 122,
                 borderRadius: 4,
                 border: `1px solid ${theme.primary.plainBorder}`,
                 background: theme.background.level2,
+                overflow: 'hidden',
                 zIndex: 1000,
                 pointerEvents: 'none',
               }}
-              onError={(e) => {
-                (e.currentTarget as HTMLImageElement).style.display = 'none';
-              }}
-            />
+            >
+              {hoverSrc && (
+                <img
+                  key={hoverSrc}
+                  src={hoverSrc}
+                  style={{
+                    width: 120,
+                    height: 120,
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                  onError={(e) => {
+                    (e.currentTarget as HTMLImageElement).style.display =
+                      'none';
+                  }}
+                />
+              )}
+              <div style={{ padding: '4px 6px', fontSize: '11px' }}>
+                <div
+                  style={{
+                    fontWeight: 600,
+                    color: theme.text.primary,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {activeColors?.labels[hoverPreview.index] ??
+                    plotData.sample_ids[hoverPreview.index].slice(0, 8)}
+                </div>
+                <div style={{ color: theme.text.secondary }}>
+                  {plotData.x[hoverPreview.index].toFixed(3)},{' '}
+                  {plotData.y[hoverPreview.index].toFixed(3)},{' '}
+                  {plotData.z[hoverPreview.index].toFixed(3)}
+                </div>
+              </div>
+            </div>
           )}
 
           {/* Colorscale legend for continuous color fields */}
