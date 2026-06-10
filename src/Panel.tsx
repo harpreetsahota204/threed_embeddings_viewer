@@ -31,6 +31,7 @@ import {
 import { usePlot } from './usePlot';
 import LassoOverlay from './LassoOverlay';
 import TabIndicator from './TabIndicator';
+import EmbeddingsPanelIcon from './Icon';
 import HoverCard from './HoverCard';
 import { CategoricalLegend, ColorLegend, FloatingPanel } from './Legend';
 import {
@@ -869,6 +870,7 @@ registerComponent({
   component: ThreeDEmbeddingsPanel,
   type: PluginComponentType.Panel,
   activator: () => true,
+  Icon: EmbeddingsPanelIcon,
   panelOptions: {
     TabIndicator,
   },
