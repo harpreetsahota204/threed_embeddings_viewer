@@ -33,9 +33,16 @@ export function useSelectionEffect() {
     const hasViewStages = view && view.length > 0;
 
     if (!hasFilters && !hasViewStages) {
+      log("selection effect: no filters/stages; clearing dimming set");
       setViewSelection(null);
       return;
     }
+
+    log(
+      `selection effect: fetching view samples (filters=${
+        Object.keys(filters || {}).length
+      }, stages=${view?.length ?? 0})`
+    );
 
     // The execute() promise does not resolve with the result; results
     // must be read via the callback option

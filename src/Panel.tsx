@@ -2,7 +2,9 @@
  * 3D Embeddings Panel
  *
  * Renders a plotly scatter3d plot of 3D brain visualization results with
- * click + custom lasso selection (scatter3d has no native selection support).
+ * click + custom lasso selection (scatter3d has no native selection
+ * support). Styled to match the built-in 2D Embeddings panel: floating
+ * controls over a clean, axis-less plot.
  */
 
 import React, { useCallback, useMemo, useRef, useState } from 'react';
@@ -15,13 +17,28 @@ import { useBrainResultsSelector } from './useBrainResult';
 import { useLabelSelector } from './useLabelSelector';
 import { usePlotSelection } from './usePlotSelection';
 import { usePlot } from './usePlot';
+import { useDebugLogging } from './useDebugLogging';
 import LassoOverlay from './LassoOverlay';
+import TabIndicator from './TabIndicator';
 import { selectIdsInLasso, Point2D } from './lasso';
 import { dimToward, numericToColors } from './colors';
 import { log } from './logger';
 import './Operator';
 
 const SELECTED_COLOR = '#ff9800';
+const DEFAULT_CAMERA = { eye: { x: 1.5, y: 1.5, z: 1.5 } };
+
+// Module-level so the camera survives panel remounts (applying a lasso
+// selection changes the view, which reloads the page query and remounts
+// the panel subtree)
+let savedCamera: any = null;
+
+const HIDDEN_AXIS = {
+  visible: false,
+  showgrid: false,
+  zeroline: false,
+  showbackground: false,
+};
 
 const Value = React.memo<{ value: string; className?: string }>(
   ({ value }) => <>{value}</>
@@ -52,6 +69,7 @@ const ThreeDEmbeddingsPanel = () => {
   const labelSelector = useLabelSelector();
   const plotSelection = usePlotSelection();
   const { plotData, plotError } = usePlot();
+  useDebugLogging();
   const selectedSamples = useRecoilValue(fos.selectedSamples) as Set<string>;
   const [lassoActive, setLassoActive] = useState(false);
   // Bumping this value resets the camera to the layout default (uirevision).
@@ -69,15 +87,21 @@ const ThreeDEmbeddingsPanel = () => {
     [theme.neutral.softBg]
   );
 
-  const buttonStyle = useCallback(
+  // Matches the 2D embeddings panel "PlotOption" button styling
+  const plotOptionStyle = useCallback(
     (active = false) => ({
-      padding: '6px 12px',
-      backgroundColor: active ? theme.primary.plainColor : 'transparent',
-      border: `1px solid ${theme.primary.plainBorder}`,
-      borderRadius: '4px',
+      display: 'flex',
+      alignItems: 'center',
       cursor: 'pointer',
-      color: active ? theme.background.level1 : theme.text.secondary,
-      fontSize: '13px',
+      color: active ? theme.background.level1 : theme.primary.plainColor,
+      background: active ? theme.primary.plainColor : theme.neutral.softBg,
+      border: 'none',
+      borderBottom: `1px solid ${theme.primary.plainColor}`,
+      borderTopLeftRadius: 3,
+      borderTopRightRadius: 3,
+      padding: '0.25rem 0.5rem',
+      fontSize: '14px',
+      fontFamily: 'inherit',
     }),
     [theme]
   );
@@ -111,16 +135,38 @@ const ThreeDEmbeddingsPanel = () => {
     const BASE_SIZE = 8;
     const DIMMED_SIZE = 6;
     const CHECKED_SIZE = 12;
+    const HALO_SCALE = 2.4;
 
     let colors: string[];
     let sizes: number[];
+
+    // Soft "glow" behind selected points: a second trace at the same
+    // coordinates with larger, translucent markers, drawn under the
+    // main trace. Always present (possibly empty) so the trace count
+    // never changes across selections.
+    const halo = {
+      x: [] as number[],
+      y: [] as number[],
+      z: [] as number[],
+      colors: [] as string[],
+      sizes: [] as number[],
+    };
+    const addHalo = (i: number, color: string, size: number) => {
+      halo.x.push(plotData.x[i]);
+      halo.y.push(plotData.y[i]);
+      halo.z.push(plotData.z[i]);
+      halo.colors.push(color);
+      halo.sizes.push(size * HALO_SCALE);
+    };
 
     if (!resolvedSelection) {
       colors = baseColors;
       sizes = new Array(plotData.x.length).fill(BASE_SIZE);
     } else {
       const selectionSet = new Set(resolvedSelection);
-      const background = theme.background.level1;
+      // The visible plot background is the spaces panel background
+      const background =
+        theme.background.mediaSpace || theme.background.level2;
 
       colors = [];
       sizes = [];
@@ -128,17 +174,17 @@ const ThreeDEmbeddingsPanel = () => {
         if (selectedSamples.has(id)) {
           colors.push(SELECTED_COLOR);
           sizes.push(CHECKED_SIZE);
+          addHalo(i, SELECTED_COLOR, CHECKED_SIZE);
         } else if (selectionSet.has(id)) {
           colors.push(baseColors[i]);
           sizes.push(BASE_SIZE);
+          addHalo(i, baseColors[i], BASE_SIZE);
         } else {
           colors.push(dimToward(baseColors[i], background, 0.8));
           sizes.push(DIMMED_SIZE);
         }
       });
     }
-
-    const marker = { color: colors, size: sizes, opacity: 0.85 };
 
     // Each recompute makes plotly rebuild the WebGL scene, so this should
     // only fire when data or selection actually changes
@@ -153,11 +199,21 @@ const ThreeDEmbeddingsPanel = () => {
       {
         type: 'scatter3d',
         mode: 'markers',
+        x: halo.x,
+        y: halo.y,
+        z: halo.z,
+        marker: { color: halo.colors, size: halo.sizes, opacity: 0.25 },
+        hoverinfo: 'skip',
+        showlegend: false,
+      },
+      {
+        type: 'scatter3d',
+        mode: 'markers',
         x: plotData.x,
         y: plotData.y,
         z: plotData.z,
         text: plotData.labels,
-        marker,
+        marker: { color: colors, size: sizes, opacity: 0.85 },
         hovertemplate:
           '<b>%{text}</b><br>x: %{x:.3f}<br>y: %{y:.3f}<br>z: %{z:.3f}<extra></extra>',
         showlegend: false,
@@ -167,8 +223,61 @@ const ThreeDEmbeddingsPanel = () => {
     plotData,
     plotSelection.resolvedSelection,
     selectedSamples,
-    theme.background.level1,
+    theme.background.mediaSpace,
+    theme.background.level2,
   ]);
+
+  const plotLayout = useMemo(
+    () => ({
+      autosize: true,
+      uirevision: cameraRev,
+      margin: { l: 0, r: 0, t: 0, b: 0 },
+      font: { family: 'var(--fo-fontFamily-body)', size: 14 },
+      scene: {
+        dragmode: 'orbit',
+        xaxis: HIDDEN_AXIS,
+        yaxis: HIDDEN_AXIS,
+        zaxis: HIDDEN_AXIS,
+        camera: savedCamera || DEFAULT_CAMERA,
+        bgcolor: 'rgba(0,0,0,0)',
+      },
+      hovermode: 'closest',
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+    }),
+    [cameraRev]
+  );
+
+  // Plotly only writes the live camera back into the layout on a clean
+  // canvas mouseup/wheel, so a zoom/rotate that ends off-canvas would be
+  // lost on the next trace rebuild (the view "resets"). Snapshot the live
+  // camera from the scene right before any selection-triggered rebuild,
+  // and keep both the module copy (for remounts) and plotly's layout
+  // object (for in-place rebuilds) in sync.
+  const captureCamera = useCallback(() => {
+    const camera =
+      plotRef.current?.el?._fullLayout?.scene?._scene?.getCamera?.();
+    if (camera) {
+      savedCamera = camera;
+      plotLayout.scene.camera = camera;
+    }
+  }, [plotLayout]);
+
+  const handleRelayout = useCallback(
+    (event: any) => {
+      const camera = event?.['scene.camera'];
+      if (camera) {
+        savedCamera = camera;
+        plotLayout.scene.camera = camera;
+      }
+    },
+    [plotLayout]
+  );
+
+  const handleResetView = useCallback(() => {
+    savedCamera = null;
+    setCameraRev((rev) => rev + 1);
+  }, []);
 
   // plotly gl3d emits plotly_click from its render loop whenever a mouse
   // button is held over a point — NOT once per DOM click. Since our click
@@ -187,10 +296,7 @@ const ThreeDEmbeddingsPanel = () => {
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     const down = pointerDownRef.current;
-    if (
-      down &&
-      Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5
-    ) {
+    if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) {
       // It's a drag (camera rotation), not a click
       clickGateRef.current = 0;
     }
@@ -198,17 +304,23 @@ const ThreeDEmbeddingsPanel = () => {
 
   const handleClick = useCallback(
     (event: any) => {
-      if (lassoActive || !event?.points?.length || !plotData) return;
+      if (lassoActive || !plotData) return;
+
+      // The halo trace has hoverinfo skip; only the main trace (index 1)
+      // produces points
+      const point = event?.points?.find((p: any) => p.curveNumber === 1);
+      if (!point) return;
 
       const gate = clickGateRef.current;
       if (!gate || performance.now() - gate > 500) return;
       clickGateRef.current = 0; // consume: one click per gesture
 
-      const sampleId = plotData.sample_ids[event.points[0].pointNumber];
+      const sampleId = plotData.sample_ids[point.pointNumber];
       log('point clicked:', sampleId);
+      captureCamera();
       plotSelection.handleSelected([sampleId]);
     },
-    [lassoActive, plotData, plotSelection]
+    [lassoActive, plotData, plotSelection, captureCamera]
   );
 
   const handleLassoComplete = useCallback(
@@ -224,38 +336,18 @@ const ThreeDEmbeddingsPanel = () => {
         `matched=${ids.length}/${plotData.sample_ids.length} pts,`,
         `${(performance.now() - t0).toFixed(1)}ms`
       );
+      captureCamera();
       plotSelection.handleSelected(ids);
     },
-    [plotData, plotSelection]
+    [plotData, plotSelection, captureCamera]
   );
 
   const handleLassoCancel = useCallback(() => setLassoActive(false), []);
 
-  const plotLayout = useMemo(
-    () => ({
-      autosize: true,
-      uirevision: cameraRev,
-      margin: { l: 0, r: 0, t: 0, b: 0 },
-      scene: {
-        dragmode: 'turntable',
-        xaxis: { title: 'Component 1', gridcolor: theme.primary.plainBorder },
-        yaxis: { title: 'Component 2', gridcolor: theme.primary.plainBorder },
-        zaxis: { title: 'Component 3', gridcolor: theme.primary.plainBorder },
-        camera: { eye: { x: 1.5, y: 1.5, z: 1.5 } },
-        bgcolor: theme.background.level1,
-      },
-      hovermode: 'closest',
-      paper_bgcolor: theme.background.level1,
-      plot_bgcolor: theme.background.level1,
-    }),
-    [cameraRev, theme.primary.plainBorder, theme.background.level1]
-  );
-
   const plotConfig = useMemo(
     () => ({
-      displayModeBar: true,
+      displayModeBar: false,
       displaylogo: false,
-      modeBarButtonsToRemove: ['toImage'],
       responsive: true,
     }),
     []
@@ -278,163 +370,144 @@ const ThreeDEmbeddingsPanel = () => {
     );
   }
 
-  const isLoading =
-    brainResultSelector.hasSelection && !plotData && !plotError;
+  const isLoading = brainResultSelector.hasSelection && !plotData && !plotError;
 
   return (
     <div
       style={{
-        display: 'flex',
-        flexDirection: 'column',
+        position: 'relative',
         height: '100%',
-        background: theme.background.level1,
+        width: '100%',
+        // No background: inherit the spaces panel background, exactly
+        // like the 2D embeddings panel
       }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
     >
-      {/* Control Bar */}
+      {/* Floating controls, styled like the 2D embeddings panel */}
       <div
         style={{
-          padding: '0.5rem',
-          borderBottom: `1px solid ${theme.primary.plainBorder}`,
+          position: 'absolute',
+          top: '1rem',
+          left: 0,
+          width: '100%',
+          zIndex: 20,
           display: 'flex',
-          alignItems: 'center',
-          gap: '0.5rem',
-          flexWrap: 'wrap',
-          background: theme.background.level2,
+          justifyContent: 'space-between',
+          columnGap: '1rem',
+          padding: '0 1rem',
+          pointerEvents: 'none',
         }}
       >
-        <Selector
-          cy="3d-embeddings-brain-key"
-          {...brainResultSelector.handlers}
-          placeholder="Select brain key"
-          overflow={true}
-          component={Value}
-          resultsPlacement="bottom-start"
-          containerStyle={selectorStyle}
-        />
-
-        {brainResultSelector.hasSelection && (
+        <div
+          style={{ display: 'flex', columnGap: '1rem', pointerEvents: 'all' }}
+        >
           <Selector
-            cy="3d-embeddings-colorby"
-            {...labelSelector.handlers}
-            placeholder="Color by"
+            cy="3d-embeddings-brain-key"
+            {...brainResultSelector.handlers}
+            placeholder="Select brain key"
             overflow={true}
             component={Value}
             resultsPlacement="bottom-start"
             containerStyle={selectorStyle}
           />
-        )}
+
+          {brainResultSelector.hasSelection && (
+            <Selector
+              cy="3d-embeddings-colorby"
+              {...labelSelector.handlers}
+              placeholder="Color by"
+              overflow={true}
+              component={Value}
+              resultsPlacement="bottom-start"
+              containerStyle={selectorStyle}
+            />
+          )}
+
+          {plotData && (
+            <>
+              <button
+                onClick={() => setLassoActive((active) => !active)}
+                style={plotOptionStyle(lassoActive)}
+                title="Draw a lasso around points to select them (Esc to cancel)"
+              >
+                Lasso
+              </button>
+
+              <button
+                onClick={handleResetView}
+                style={plotOptionStyle()}
+                title="Reset camera view"
+              >
+                Reset View
+              </button>
+            </>
+          )}
+        </div>
 
         {plotData && (
-          <>
-            <button
-              onClick={() => setLassoActive((active) => !active)}
-              style={buttonStyle(lassoActive)}
-              title="Draw a lasso around points to select them (Esc to cancel)"
-            >
-              Lasso
-            </button>
-
-            <button
-              onClick={() => setCameraRev((rev) => rev + 1)}
-              style={buttonStyle()}
-              title="Reset camera view"
-            >
-              Reset View
-            </button>
-          </>
-        )}
-
-        {plotSelection.hasSelection && (
-          <button
-            onClick={plotSelection.clearSelection}
-            style={buttonStyle()}
-            title="Clear selection"
-          >
-            Clear Selection
-          </button>
-        )}
-
-        {plotSelection.hasSelection && (
-          <span
+          <div
             style={{
-              color: theme.primary.plainColor,
-              fontWeight: 500,
-              fontSize: '13px',
-            }}
-          >
-            {`${plotSelection.selectionStyle === 'plot' ? 'In view' : 'Selected'}: ${
-              plotSelection.resolvedSelection?.length || 0
-            }`}
-          </span>
-        )}
-
-        {plotData && (
-          <span
-            style={{
-              marginLeft: 'auto',
               color: theme.text.secondary,
               fontSize: '13px',
+              pointerEvents: 'none',
+              alignSelf: 'center',
             }}
           >
             Points: {plotData.x.length.toLocaleString()}
-          </span>
+          </div>
         )}
       </div>
 
-      {/* Plot Area */}
-      <div
-        style={{ flex: 1, position: 'relative', minHeight: 0 }}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-      >
-        {plotError &&
-          centerMessage(
-            <>
-              <div style={{ color: theme.error.plainColor }}>
-                Error loading visualization
-              </div>
-              <div style={{ fontSize: '0.9rem' }}>{plotError}</div>
-            </>,
-            theme.text.secondary
-          )}
-
-        {!plotError &&
-          !brainResultSelector.hasSelection &&
-          centerMessage(
-            <>
-              <div style={{ fontSize: '1rem' }}>
-                Select the Brain Key with your 3D Visualization
-              </div>
-              <div style={{ fontSize: '0.85rem', opacity: 0.7 }}>
-                Use the dropdown above to choose a visualization to display
-              </div>
-            </>,
-            theme.text.secondary
-          )}
-
-        {isLoading &&
-          centerMessage(<div>Loading visualization...</div>, theme.text.secondary)}
-
-        {!plotError && plotData && (
+      {/* Plot area */}
+      {plotError &&
+        centerMessage(
           <>
-            <Plot
-              ref={plotRef}
-              data={plotTraces as any}
-              layout={plotLayout as any}
-              config={plotConfig}
-              style={plotStyle}
-              onClick={handleClick}
-              useResizeHandler={true}
-            />
-            {lassoActive && (
-              <LassoOverlay
-                onComplete={handleLassoComplete}
-                onCancel={handleLassoCancel}
-              />
-            )}
-          </>
+            <div style={{ color: theme.error.plainColor }}>
+              Error loading visualization
+            </div>
+            <div style={{ fontSize: '0.9rem' }}>{plotError}</div>
+          </>,
+          theme.text.secondary
         )}
-      </div>
+
+      {!plotError &&
+        !brainResultSelector.hasSelection &&
+        centerMessage(
+          <>
+            <div style={{ fontSize: '1rem' }}>
+              Select the Brain Key with your 3D Visualization
+            </div>
+            <div style={{ fontSize: '0.85rem', opacity: 0.7 }}>
+              Use the dropdown above to choose a visualization to display
+            </div>
+          </>,
+          theme.text.secondary
+        )}
+
+      {isLoading &&
+        centerMessage(<div>Loading visualization...</div>, theme.text.secondary)}
+
+      {!plotError && plotData && (
+        <>
+          <Plot
+            ref={plotRef}
+            data={plotTraces as any}
+            layout={plotLayout as any}
+            config={plotConfig}
+            style={plotStyle}
+            onClick={handleClick}
+            onRelayout={handleRelayout}
+            useResizeHandler={true}
+          />
+          {lassoActive && (
+            <LassoOverlay
+              onComplete={handleLassoComplete}
+              onCancel={handleLassoCancel}
+            />
+          )}
+        </>
+      )}
     </div>
   );
 };
@@ -445,6 +518,9 @@ registerComponent({
   component: ThreeDEmbeddingsPanel,
   type: PluginComponentType.Panel,
   activator: () => true,
+  panelOptions: {
+    TabIndicator,
+  },
 });
 
 export default ThreeDEmbeddingsPanel;

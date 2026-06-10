@@ -1,10 +1,18 @@
-import { useEffect, useMemo } from "react";
-import { useRecoilState } from "recoil";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import {
+  useRecoilState,
+  useRecoilValue,
+  useSetRecoilState,
+} from "recoil";
 import * as fos from "@fiftyone/state";
 import { usePanelStatePartial } from "@fiftyone/spaces";
+import { lassoSelectionAtom, lassoStageIdAtom } from "./State";
 import { log } from "./logger";
 
-const SELECTION_SCOPE = "3d-embeddings-selection";
+const SELECT_STAGE_CLS = "fiftyone.core.stages.Select";
+
+// Tracks dataset switches across remounts so stale selections are dropped
+let lastDataset: string | null = null;
 
 function sameIds(a: string[], b: string[] | null): boolean {
   if (!b || a.length !== b.length) return false;
@@ -12,40 +20,119 @@ function sameIds(a: string[], b: string[] | null): boolean {
   return a.every((id) => bSet.has(id));
 }
 
-export function usePlotSelection() {
-  const resetExtendedSelection = fos.useResetExtendedSelection();
-  const [{ selection }, setExtendedSelection] = useRecoilState<{
-    selection: string[] | null;
-    scope?: string;
-  }>(fos.extendedSelection);
+function newStageId(): string {
+  return typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `lasso-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * Clears the lasso selection and removes the plugin's Select stage from
+ * the view. Safe to use outside of the panel context (eg the tab
+ * indicator), since it only touches global state.
+ */
+export function useClearLassoSelection() {
+  const view = useRecoilValue(fos.view) as any[];
+  const setView = fos.useSetView();
   const [selectedSamples, setSelectedSamples] = useRecoilState<Set<string>>(
     fos.selectedSamples
   );
-  // The lasso/click selection lives in panel state because the App resets
-  // fos.extendedSelection whenever the page query reloads (server "refresh"
-  // events re-commit the dataset fragment, whose sync closure does not
-  // track user-set values)
-  const [lassoSelection, setLassoSelection] = usePanelStatePartial(
-    "lassoSelection",
-    null,
-    true
+  const [stageId, setStageId] = useRecoilState(lassoStageIdAtom);
+  const setLassoSelection = useSetRecoilState(lassoSelectionAtom);
+
+  return useCallback(() => {
+    const remaining = (view || []).filter((s) => s?._uuid !== stageId);
+    log(
+      `clearSelection: removing stage ${stageId ?? "none"},`,
+      `view ${(view || []).length} -> ${remaining.length} stages,`,
+      `checked=${selectedSamples.size}`
+    );
+    setLassoSelection(null);
+    if (stageId) {
+      setStageId(null);
+      setView(remaining);
+    }
+    if (selectedSamples.size > 0) {
+      setSelectedSamples(new Set());
+    }
+  }, [view, stageId, selectedSamples]);
+}
+
+/**
+ * If the user removed our stage from the view bar, drop the local
+ * selection too. Mounted in the tab indicator (not the panel) so it also
+ * works while the panel is hidden.
+ *
+ * Tracks the specific uuid that has been observed in the view: setView
+ * propagates asynchronously, so right after a lasso replaces the stage,
+ * the view still briefly contains the OLD uuid. A boolean "armed" flag
+ * here caused replaced stages to be misread as external removals,
+ * orphaning the in-flight stage.
+ */
+export function useLassoStageWatchdog() {
+  const view = useRecoilValue(fos.view) as any[];
+  const [stageId, setStageId] = useRecoilState(lassoStageIdAtom);
+  const setLassoSelection = useSetRecoilState(lassoSelectionAtom);
+
+  const armedStageRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!stageId) {
+      armedStageRef.current = null;
+      return;
+    }
+
+    const present = (view || []).some((stage) => stage?._uuid === stageId);
+    if (present) {
+      if (armedStageRef.current !== stageId) {
+        log(`lasso stage ${stageId} observed in view (armed)`);
+      }
+      armedStageRef.current = stageId;
+    } else if (armedStageRef.current === stageId) {
+      log(
+        `lasso stage ${stageId} removed from view externally; clearing selection`
+      );
+      armedStageRef.current = null;
+      setStageId(null);
+      setLassoSelection(null);
+    } else {
+      log(`lasso stage ${stageId} not yet in view (waiting for propagation)`);
+    }
+  }, [view, stageId]);
+}
+
+/**
+ * Lasso/click selections are applied as a Select view stage rather than
+ * fos.extendedSelection. The extended selection is client-only state that
+ * the App resets whenever the page query reloads, and nothing can
+ * re-assert it while the panel is hidden (panels unmount). A view stage is
+ * server-backed session state, so the grid filter survives refreshes and
+ * the panel being hidden, and is visible/removable in the view bar.
+ */
+export function usePlotSelection() {
+  const datasetName = useRecoilValue(fos.datasetName) as string;
+  const view = useRecoilValue(fos.view) as any[];
+  const setView = fos.useSetView();
+  const [selectedSamples, setSelectedSamples] = useRecoilState<Set<string>>(
+    fos.selectedSamples
   );
+  const [lassoSelection, setLassoSelection] =
+    useRecoilState(lassoSelectionAtom);
+  const [stageId, setStageId] = useRecoilState(lassoStageIdAtom);
   // Sample ids in the current filtered view, used for dimming
   const [viewSelection] = usePanelStatePartial("viewSelection", null, true);
+  const clearSelection = useClearLassoSelection();
 
-  // Re-assert the extended selection if the App wiped it (this is what
-  // filters the sample grid)
+  // Drop stale selection state when the dataset changes
   useEffect(() => {
-    if (lassoSelection?.length && (!selection || selection.length === 0)) {
+    if (lastDataset !== null && lastDataset !== datasetName) {
       log(
-        `re-asserting extended selection (${lassoSelection.length} ids) after external reset`
+        `dataset changed (${lastDataset} -> ${datasetName}); clearing lasso state`
       );
-      setExtendedSelection({
-        selection: lassoSelection,
-        scope: SELECTION_SCOPE,
-      });
+      setLassoSelection(null);
+      setStageId(null);
     }
-  }, [selection, lassoSelection]);
+    lastDataset = datasetName;
+  }, [datasetName]);
 
   function handleSelected(selectedResults: string[]) {
     log("handleSelected:", selectedResults.length, "ids");
@@ -65,20 +152,26 @@ export function usePlotSelection() {
     if (selectedSamples.size > 0) {
       setSelectedSamples(new Set());
     }
-    setLassoSelection(selectedResults);
-    setExtendedSelection({
-      selection: selectedResults,
-      scope: SELECTION_SCOPE,
-    });
-  }
 
-  function clearSelection() {
-    log("clearSelection");
-    setLassoSelection(null);
-    resetExtendedSelection();
-    if (selectedSamples.size > 0) {
-      setSelectedSamples(new Set());
-    }
+    const uuid = newStageId();
+    const stage = {
+      _cls: SELECT_STAGE_CLS,
+      kwargs: [
+        ["sample_ids", selectedResults],
+        ["ordered", false],
+      ],
+      _uuid: uuid,
+    };
+
+    const otherStages = (view || []).filter((s) => s?._uuid !== stageId);
+    log(
+      `applying Select stage ${uuid} (${selectedResults.length} ids),`,
+      `replacing ${stageId ?? "none"},`,
+      `view ${(view || []).length} -> ${otherStages.length + 1} stages`
+    );
+    setLassoSelection(selectedResults);
+    setStageId(uuid);
+    setView([...otherStages, stage]);
   }
 
   // Memoized so that the trace memo in Panel only invalidates when the
@@ -92,7 +185,7 @@ export function usePlotSelection() {
       };
     }
     if (lassoSelection?.length) {
-      return { resolvedSelection: lassoSelection, selectionStyle: "extended" };
+      return { resolvedSelection: lassoSelection, selectionStyle: "lasso" };
     }
     if (viewSelection?.length) {
       return { resolvedSelection: viewSelection, selectionStyle: "plot" };

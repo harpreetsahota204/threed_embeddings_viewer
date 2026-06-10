@@ -26,3 +26,16 @@ export const plotErrorAtom = atom<string | null>({
   key: 'threed-embeddings-plot-error',
   default: null,
 });
+
+// Lasso selection state lives in plain atoms (not panel state) because the
+// panel tab indicator renders outside of the panel context
+export const lassoSelectionAtom = atom<string[] | null>({
+  key: 'threed-embeddings-lasso-selection',
+  default: null,
+});
+
+// The _uuid of the Select stage this plugin added to the view
+export const lassoStageIdAtom = atom<string | null>({
+  key: 'threed-embeddings-lasso-stage-id',
+  default: null,
+});
