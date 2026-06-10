@@ -58,6 +58,54 @@ function pointInPolygon(pt: Point2D, polygon: Point2D[]): boolean {
   return inside;
 }
 
+interface SceneInternals {
+  camera: CameraParams;
+  dataScale: number[];
+  rect: DOMRect;
+}
+
+function getSceneInternals(gd: any): SceneInternals | null {
+  const scene = gd?._fullLayout?.scene?._scene;
+  const glplot = scene?.glplot;
+  if (!glplot?.cameraParams || !scene.dataScale || !scene.container) {
+    return null;
+  }
+
+  return {
+    camera: glplot.cameraParams as CameraParams,
+    dataScale: scene.dataScale as number[],
+    rect: scene.container.getBoundingClientRect(),
+  };
+}
+
+function toClient(
+  { camera, dataScale: [sx, sy, sz], rect }: SceneInternals,
+  x: number,
+  y: number,
+  z: number
+): Point2D | null {
+  const p = project(camera, [x * sx, y * sy, z * sz]);
+
+  // Behind the camera
+  if (p[3] <= 0) return null;
+
+  return {
+    x: rect.left + (0.5 + (0.5 * p[0]) / p[3]) * rect.width,
+    y: rect.top + (0.5 - (0.5 * p[1]) / p[3]) * rect.height,
+  };
+}
+
+/** Projects a single data point to client (viewport) coordinates */
+export function projectPointToClient(
+  gd: any,
+  x: number,
+  y: number,
+  z: number
+): Point2D | null {
+  const internals = getSceneInternals(gd);
+  return internals && toClient(internals, x, y, z);
+}
+
 /**
  * Returns the sample IDs whose projected screen positions fall inside the
  * polygon, which must be given in client (viewport) coordinates.
@@ -67,34 +115,16 @@ export function selectIdsInLasso(
   plotData: PlotData,
   polygon: Point2D[]
 ): string[] {
-  const scene = gd?._fullLayout?.scene?._scene;
-  const glplot = scene?.glplot;
-  if (!glplot?.cameraParams || !scene.dataScale || !scene.container) {
+  const internals = getSceneInternals(gd);
+  if (!internals) {
     logError('3D scene internals unavailable; cannot lasso select');
     return [];
   }
 
-  const camera = glplot.cameraParams as CameraParams;
-  const [sx, sy, sz] = scene.dataScale as number[];
-  const rect = scene.container.getBoundingClientRect();
-
   const ids: string[] = [];
   for (let i = 0; i < plotData.sample_ids.length; i++) {
-    const p = project(camera, [
-      plotData.x[i] * sx,
-      plotData.y[i] * sy,
-      plotData.z[i] * sz,
-    ]);
-
-    // Skip points behind the camera
-    if (p[3] <= 0) continue;
-
-    const screen = {
-      x: rect.left + (0.5 + (0.5 * p[0]) / p[3]) * rect.width,
-      y: rect.top + (0.5 - (0.5 * p[1]) / p[3]) * rect.height,
-    };
-
-    if (pointInPolygon(screen, polygon)) {
+    const screen = toClient(internals, plotData.x[i], plotData.y[i], plotData.z[i]);
+    if (screen && pointInPolygon(screen, polygon)) {
       ids.push(plotData.sample_ids[i]);
     }
   }

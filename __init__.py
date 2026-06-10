@@ -95,18 +95,18 @@ class LoadVisualizationResults(foo.Operator):
     def _prepare_plot_data(self, ctx, results, color_by):
         points = results.points
         sample_ids = list(results.sample_ids)
+        view = ctx.dataset.select(sample_ids, ordered=True)
 
         data = {
             "x": points[:, 0].tolist(),
             "y": points[:, 1].tolist(),
             "z": points[:, 2].tolist(),
             "sample_ids": sample_ids,
+            "filepaths": view.values("filepath"),
         }
 
         if color_by:
-            labels, colors, scheme = self._compute_colors(
-                ctx, sample_ids, color_by
-            )
+            labels, colors, scheme = self._compute_colors(view, color_by)
         else:
             labels = [sid[:8] for sid in sample_ids]
             colors = ["#1f77b4"] * len(sample_ids)
@@ -117,9 +117,8 @@ class LoadVisualizationResults(foo.Operator):
         data["color_scheme"] = scheme
         return data
 
-    def _compute_colors(self, ctx, sample_ids, color_field):
+    def _compute_colors(self, view, color_field):
         """Computes per-sample labels and colors for ``color_field``."""
-        view = ctx.dataset.select(sample_ids, ordered=True)
         values = [_flatten(v) for v in view.values(color_field)]
 
         labels = [str(v) if v is not None else "None" for v in values]

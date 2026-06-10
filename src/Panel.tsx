@@ -20,8 +20,12 @@ import { usePlot } from './usePlot';
 import { useDebugLogging } from './useDebugLogging';
 import LassoOverlay from './LassoOverlay';
 import TabIndicator from './TabIndicator';
-import { selectIdsInLasso, Point2D } from './lasso';
-import { dimToward, numericToColors } from './colors';
+import { selectIdsInLasso, projectPointToClient, Point2D } from './lasso';
+import {
+  dimToward,
+  numericToColors,
+  VIRIDIS_CSS_GRADIENT,
+} from './colors';
 import { log } from './logger';
 import './Operator';
 
@@ -344,6 +348,52 @@ const ThreeDEmbeddingsPanel = () => {
 
   const handleLassoCancel = useCallback(() => setLassoActive(false), []);
 
+  // Thumbnail preview of the hovered sample, positioned next to the
+  // projected point in viewport coordinates
+  const [hoverPreview, setHoverPreview] = useState<{
+    index: number;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  const handleHover = useCallback(
+    (event: any) => {
+      if (lassoActive || !plotData?.filepaths) return;
+
+      const point = event?.points?.find((p: any) => p.curveNumber === 1);
+      if (!point) return;
+
+      const i = point.pointNumber;
+      const pos = projectPointToClient(
+        plotRef.current?.el,
+        plotData.x[i],
+        plotData.y[i],
+        plotData.z[i]
+      );
+      if (pos) {
+        setHoverPreview((prev) =>
+          prev?.index === i ? prev : { index: i, x: pos.x, y: pos.y }
+        );
+      }
+    },
+    [lassoActive, plotData]
+  );
+
+  const handleUnhover = useCallback(() => setHoverPreview(null), []);
+
+  const hoverSrc = useMemo(() => {
+    if (hoverPreview === null || !plotData?.filepaths) return null;
+    const filepath = plotData.filepaths[hoverPreview.index];
+    return filepath ? (fos.getSampleSrc(filepath) as string) : null;
+  }, [hoverPreview, plotData]);
+
+  // Min/max labels for the continuous colorscale legend
+  const colorRange = useMemo(() => {
+    if (plotData?.color_scheme !== 'continuous') return null;
+    const values = plotData.colors as number[];
+    return { min: Math.min(...values), max: Math.max(...values) };
+  }, [plotData]);
+
   const plotConfig = useMemo(
     () => ({
       displayModeBar: false,
@@ -498,6 +548,8 @@ const ThreeDEmbeddingsPanel = () => {
             style={plotStyle}
             onClick={handleClick}
             onRelayout={handleRelayout}
+            onHover={handleHover}
+            onUnhover={handleUnhover}
             useResizeHandler={true}
           />
           {lassoActive && (
@@ -505,6 +557,75 @@ const ThreeDEmbeddingsPanel = () => {
               onComplete={handleLassoComplete}
               onCancel={handleLassoCancel}
             />
+          )}
+
+          {/* Hovered sample thumbnail */}
+          {hoverSrc && hoverPreview && !lassoActive && (
+            <img
+              key={hoverSrc}
+              src={hoverSrc}
+              style={{
+                position: 'fixed',
+                left: hoverPreview.x + 16,
+                top: hoverPreview.y + 16,
+                width: 120,
+                height: 120,
+                objectFit: 'cover',
+                borderRadius: 4,
+                border: `1px solid ${theme.primary.plainBorder}`,
+                background: theme.background.level2,
+                zIndex: 1000,
+                pointerEvents: 'none',
+              }}
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).style.display = 'none';
+              }}
+            />
+          )}
+
+          {/* Colorscale legend for continuous color fields */}
+          {colorRange && (
+            <div
+              style={{
+                position: 'absolute',
+                right: '1rem',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                zIndex: 10,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'flex-end',
+                gap: 4,
+                pointerEvents: 'none',
+                color: theme.text.secondary,
+                fontSize: '11px',
+              }}
+            >
+              {labelSelector.label && (
+                <div style={{ marginBottom: 2 }}>{labelSelector.label}</div>
+              )}
+              <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'space-between',
+                    textAlign: 'right',
+                  }}
+                >
+                  <span>{colorRange.max.toFixed(3)}</span>
+                  <span>{colorRange.min.toFixed(3)}</span>
+                </div>
+                <div
+                  style={{
+                    width: 12,
+                    height: 160,
+                    borderRadius: 2,
+                    background: VIRIDIS_CSS_GRADIENT,
+                  }}
+                />
+              </div>
+            </div>
           )}
         </>
       )}

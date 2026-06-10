@@ -9,6 +9,7 @@ export interface PlotData {
   y: number[];
   z: number[];
   sample_ids: string[];
+  filepaths?: string[];
   labels: string[];
   colors: (string | number)[];
   color_scheme: 'categorical' | 'continuous' | 'uniform';

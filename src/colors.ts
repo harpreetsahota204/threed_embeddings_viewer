@@ -123,3 +123,8 @@ export function numericToColors(values: number[]): string[] {
   const range = max - min || 1;
   return values.map((v) => viridis((v - min) / range));
 }
+
+/** CSS gradient matching the viridis colorscale, for the legend overlay */
+export const VIRIDIS_CSS_GRADIENT = `linear-gradient(to top, ${VIRIDIS_STOPS.map(
+  ([t, c]) => `${c} ${(t * 100).toFixed(1)}%`
+).join(', ')})`;
