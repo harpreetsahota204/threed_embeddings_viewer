@@ -6,13 +6,47 @@
 |
 """
 
+import base64
 import colorsys
-from collections import Counter
+import threading
+from collections import Counter, OrderedDict
 
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
 
 _PLUGIN_URI = "@harpreetsahota/threed-embeddings"
+
+_BRAIN_RESULTS_CACHE_SIZE = 4
+_brain_results_cache = OrderedDict()
+_brain_results_lock = threading.Lock()
+
+
+def _load_brain_results(dataset, brain_key):
+    """Loads brain results with a small in-process LRU cache.
+
+    Every operator here needs the brain results, and they are re-executed
+    on each color-by/view change; loading multi-100k-point results from
+    the database each time dominates latency. The cache key includes the
+    run's timestamp, so recomputing a run under the same brain key
+    invalidates the stale entry.
+    """
+    info = dataset.get_brain_info(brain_key)
+    key = (dataset.name, brain_key, str(info.timestamp))
+
+    with _brain_results_lock:
+        if key in _brain_results_cache:
+            _brain_results_cache.move_to_end(key)
+            return _brain_results_cache[key]
+
+    results = dataset.load_brain_results(brain_key)
+
+    with _brain_results_lock:
+        _brain_results_cache[key] = results
+        _brain_results_cache.move_to_end(key)
+        while len(_brain_results_cache) > _BRAIN_RESULTS_CACHE_SIZE:
+            _brain_results_cache.popitem(last=False)
+
+    return results
 
 
 class LoadVisualizationResults(foo.Operator):
@@ -73,7 +107,7 @@ class LoadVisualizationResults(foo.Operator):
         brain_key = ctx.params.get("brain_key")
 
         try:
-            results = ctx.dataset.load_brain_results(brain_key)
+            results = _load_brain_results(ctx.dataset, brain_key)
 
             points = results.points
             num_dims = points.shape[1]
@@ -120,9 +154,20 @@ class GetPlotColors(foo.Operator):
         color_by = ctx.params.get("color_by")
 
         try:
-            results = ctx.dataset.load_brain_results(brain_key)
-            view = ctx.dataset.select(list(results.sample_ids), ordered=True)
-            plot_colors = _compute_colors(view, color_by)
+            results = _load_brain_results(ctx.dataset, brain_key)
+
+            # One unordered values() fetch + dict reorder. Embedding the
+            # run's ids in select(ordered=True) does not scale: the ids
+            # blow up the aggregation pipeline and ordered selection is
+            # effectively quadratic in MongoDB. Samples since deleted
+            # from the dataset color as "None" rather than silently
+            # misaligning the colors array.
+            ids, values = ctx.dataset.values(["id", color_by])
+            values_by_id = dict(zip(ids, values))
+            raw_values = [
+                values_by_id.get(_id) for _id in results.sample_ids
+            ]
+            plot_colors = _compute_colors(raw_values)
         except Exception as e:
             ctx.trigger(
                 f"{_PLUGIN_URI}/set_plot_error", params={"error": str(e)}
@@ -137,12 +182,13 @@ class GetPlotColors(foo.Operator):
 
 
 class GetViewSamples(foo.Operator):
-    """Get sample IDs that are in the current filtered view.
+    """Get which brain-run samples are in the current filtered view.
 
     This is used to determine which points should be dimmed in the 3D plot
-    when filters or view stages are applied. When the view contains more
-    than ``max_ids`` matching samples, no IDs are returned and the frontend
-    skips dimming, avoiding multi-MB ID transfers on large datasets.
+    when filters or view stages are applied. The result is a base64
+    bitmask in brain-result index order (1 bit per point), so the payload
+    is n/8 bytes regardless of how many samples match — no cap needed,
+    unlike shipping id lists.
     """
 
     @property
@@ -150,25 +196,25 @@ class GetViewSamples(foo.Operator):
         return foo.OperatorConfig(
             name="get_view_samples",
             label="Get View Samples",
-            description="Get sample IDs in current view for filtering visualization",
+            description="Get in-view bitmask for dimming the visualization",
             unlisted=True,
         )
 
     def execute(self, ctx):
         brain_key = ctx.params.get("brain_key")
-        max_ids = ctx.params.get("max_ids")
         if not brain_key:
-            return {"sample_ids": []}
+            return {"in_view": None}
 
-        results = ctx.dataset.load_brain_results(brain_key)
-        brain_sample_ids = set(results.sample_ids)
-        view_ids = ctx.view.values("id")
-        matching = [i for i in view_ids if i in brain_sample_ids]
+        results = _load_brain_results(ctx.dataset, brain_key)
+        view_ids = set(ctx.view.values("id"))
 
-        if max_ids is not None and len(matching) > max_ids:
-            return {"too_many": True, "count": len(matching)}
+        sample_ids = results.sample_ids
+        bitmask = bytearray((len(sample_ids) + 7) // 8)
+        for i, sample_id in enumerate(sample_ids):
+            if sample_id in view_ids:
+                bitmask[i >> 3] |= 1 << (i & 7)
 
-        return {"sample_ids": matching}
+        return {"in_view": base64.b64encode(bytes(bitmask)).decode("ascii")}
 
 
 class GetSampleFilepath(foo.Operator):
@@ -198,8 +244,9 @@ class GetSampleFilepath(foo.Operator):
             return {"filepath": None}
 
 
-def _compute_colors(view, color_field):
-    """Computes the plot colors payload for ``color_field``.
+def _compute_colors(raw_values):
+    """Computes the plot colors payload from per-sample raw field values,
+    given in brain-result order.
 
     List values (eg per-detection labels/confidences) are aggregated per
     sample: mode for labels, mean for numbers. Hover labels carry the
@@ -216,7 +263,6 @@ def _compute_colors(view, color_field):
         categorical: {labels, categories, class_indices, class_members,
                       color_scheme}
     """
-    raw_values = view.values(color_field)
     summaries = [_summarize(v) for v in raw_values]
     class_values = [s[0] for s in summaries]
     hover_labels = [s[1] for s in summaries]

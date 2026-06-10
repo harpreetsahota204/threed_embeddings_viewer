@@ -40,6 +40,7 @@ import {
   selectIdsInLasso,
   Point2D,
 } from './lasso';
+import { decodeBitmask, testBit } from './bitmask';
 import { dimToward, minMax, numericToColors } from './colors';
 import { lassoSelectionAtom, PlotCategory } from './State';
 import {
@@ -162,9 +163,18 @@ const ThreeDEmbeddingsPanel = () => {
     true
   );
 
-  // Sample ids in the current filtered view (set by useSelectionEffect);
-  // used here to adjust legend counts to the view
-  const [viewSelection] = usePanelStatePartial('viewSelection', null, true);
+  // In-view bitmask for the current filtered view (set by
+  // useSelectionEffect); base64, in brain-result index order. Drives
+  // out-of-view dimming and view-aware legend counts.
+  const [viewBitmaskB64] = usePanelStatePartial('viewBitmask', null, true);
+
+  const viewBitmask = useMemo(() => {
+    if (!viewBitmaskB64 || !plotData) return null;
+    const bits = decodeBitmask(viewBitmaskB64);
+    // Guard against a stale bitmask from previous geometry (eg right
+    // after a brain key switch)
+    return bits.length === Math.ceil(plotData.x.length / 8) ? bits : null;
+  }, [viewBitmaskB64, plotData]);
 
   // Per-category counts within the current view (presence semantics);
   // null when unfiltered
@@ -173,22 +183,21 @@ const ThreeDEmbeddingsPanel = () => {
       !plotData ||
       !activeColors?.categories ||
       !activeColors.class_members ||
-      !viewSelection?.length
+      !viewBitmask
     ) {
       return null;
     }
 
-    const inView = new Set(viewSelection);
     const counts = new Array(activeColors.categories.length).fill(0);
-    plotData.sample_ids.forEach((id, i) => {
-      if (inView.has(id)) {
-        for (const classIndex of activeColors.class_members![i]) {
+    for (let i = 0; i < plotData.x.length; i++) {
+      if (testBit(viewBitmask, i)) {
+        for (const classIndex of activeColors.class_members[i]) {
           counts[classIndex]++;
         }
       }
-    });
+    }
     return counts;
-  }, [plotData, activeColors, viewSelection]);
+  }, [plotData, activeColors, viewBitmask]);
 
   // Drop highlights for classes that no longer exist (color-by changed)
   useEffect(() => {
@@ -215,8 +224,23 @@ const ThreeDEmbeddingsPanel = () => {
     [setHighlightedClasses]
   );
 
+  // Base (unselected, undimmed) per-point colors. Memoized separately
+  // from plotTraces so that selections/dimming changes don't recompute
+  // the colorscale mapping over every point.
+  const baseColors = useMemo(() => {
+    if (!plotData) return null;
+    if (!activeColors) {
+      return new Array(plotData.x.length).fill(UNIFORM_COLOR) as string[];
+    }
+    if (activeColors.color_scheme === 'continuous') {
+      return numericToColors(activeColors.colors!);
+    }
+    const categories = activeColors.categories!;
+    return activeColors.class_indices!.map((i) => categories[i].color);
+  }, [plotData, activeColors]);
+
   const plotTraces = useMemo(() => {
-    if (!plotData) return [];
+    if (!plotData || !baseColors) return [];
 
     const resolvedSelection = plotSelection.resolvedSelection;
 
@@ -232,23 +256,24 @@ const ThreeDEmbeddingsPanel = () => {
     // exact base color, unselected points blend toward the background
     // (solid colors, since translucent scatter3d markers render with
     // blending artifacts).
-    let baseColors: string[];
-    if (!activeColors) {
-      baseColors = new Array(plotData.x.length).fill(UNIFORM_COLOR);
-    } else if (activeColors.color_scheme === 'continuous') {
-      baseColors = numericToColors(activeColors.colors!);
-    } else {
-      const categories = activeColors.categories!;
-      baseColors = activeColors.class_indices!.map(
-        (i) => categories[i].color
-      );
-    }
+    //
+    // Bright/dim tiers: an id selection (checked samples or lasso) beats
+    // view-filter dimming (index bitmask); class highlight applies only
+    // when neither is active.
+    const selectionSet = resolvedSelection
+      ? new Set(resolvedSelection)
+      : null;
+    const inSelection: ((i: number) => boolean) | null = selectionSet
+      ? (i) => selectionSet.has(plotData.sample_ids[i])
+      : viewBitmask
+      ? (i) => testBit(viewBitmask, i)
+      : null;
 
     // Class highlight (legend clicks): applies only when no sample
     // selection/filter is active — any selection tier beats it. Presence
     // semantics: a point is highlighted if it CONTAINS a highlighted class
     const highlightedIndexSet =
-      !resolvedSelection &&
+      !inSelection &&
       activeColors?.class_members &&
       highlightedClasses?.length
         ? new Set(
@@ -306,12 +331,10 @@ const ThreeDEmbeddingsPanel = () => {
           sizes.push(DIMMED_SIZE);
         }
       });
-    } else if (!resolvedSelection) {
+    } else if (!inSelection) {
       colors = baseColors;
       sizes = new Array(plotData.x.length).fill(BASE_SIZE);
     } else {
-      const selectionSet = new Set(resolvedSelection);
-
       colors = [];
       sizes = [];
       plotData.sample_ids.forEach((id, i) => {
@@ -319,7 +342,7 @@ const ThreeDEmbeddingsPanel = () => {
           colors.push(SELECTED_COLOR);
           sizes.push(CHECKED_SIZE);
           addHalo(i, SELECTED_COLOR, CHECKED_SIZE);
-        } else if (selectionSet.has(id)) {
+        } else if (inSelection(i)) {
           colors.push(baseColors[i]);
           sizes.push(BASE_SIZE);
           addHalo(i, baseColors[i], BASE_SIZE);
@@ -355,7 +378,9 @@ const ThreeDEmbeddingsPanel = () => {
     ];
   }, [
     plotData,
+    baseColors,
     activeColors,
+    viewBitmask,
     highlightedClasses,
     plotSelection.resolvedSelection,
     selectedSamples,

@@ -1,6 +1,9 @@
 /**
- * Keeps the viewSelection panel state in sync with the current
+ * Keeps the viewBitmask panel state in sync with the current
  * view/filters so that out-of-view points are dimmed in the 3D plot.
+ *
+ * The in-view state is a base64 bitmask in brain-result index order
+ * (n/8 bytes at any scale), not an id list — see bitmask.ts.
  */
 
 import { useEffect } from "react";
@@ -11,17 +14,13 @@ import { useOperatorExecutor } from "@fiftyone/operators";
 import { useBrainResult } from "./useBrainResult";
 import { plotDataAtom } from "./State";
 
-// Above this many in-view samples, dimming is skipped entirely rather
-// than transferring huge ID lists on every filter change
-const MAX_DIMMING_IDS = 50000;
-
 export function useSelectionEffect() {
   const datasetName = useRecoilValue(fos.datasetName);
   const [brainKey] = useBrainResult();
   const view = useRecoilValue(fos.view) as unknown[];
   const filters = useRecoilValue(fos.filters) as Record<string, unknown>;
   const plotData = useRecoilValue(plotDataAtom);
-  const [, setViewSelection] = usePanelStatePartial("viewSelection", null, true);
+  const [, setViewBitmask] = usePanelStatePartial("viewBitmask", null, true);
 
   const getViewSamplesExecutor = useOperatorExecutor(
     "@harpreetsahota/threed-embeddings/get_view_samples"
@@ -36,22 +35,17 @@ export function useSelectionEffect() {
     const hasViewStages = view && view.length > 0;
 
     if (!hasFilters && !hasViewStages) {
-      setViewSelection(null);
+      setViewBitmask(null);
       return;
     }
 
     // The execute() promise does not resolve with the result; results
     // must be read via the callback option
     getViewSamplesExecutor.execute(
-      { brain_key: brainKey, max_ids: MAX_DIMMING_IDS },
+      { brain_key: brainKey },
       {
         callback: (result: any) => {
-          if (result?.result?.too_many) {
-            setViewSelection(null);
-            return;
-          }
-          const ids = result?.result?.sample_ids;
-          setViewSelection(ids?.length ? ids : null);
+          setViewBitmask(result?.result?.in_view ?? null);
         },
       }
     );

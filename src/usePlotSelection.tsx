@@ -5,7 +5,6 @@ import {
   useSetRecoilState,
 } from "recoil";
 import * as fos from "@fiftyone/state";
-import { usePanelStatePartial } from "@fiftyone/spaces";
 import { lassoSelectionAtom, lassoStageIdAtom } from "./State";
 
 const SELECT_STAGE_CLS = "fiftyone.core.stages.Select";
@@ -102,8 +101,6 @@ export function usePlotSelection() {
   const [lassoSelection, setLassoSelection] =
     useRecoilState(lassoSelectionAtom);
   const [stageId, setStageId] = useRecoilState(lassoStageIdAtom);
-  // Sample ids in the current filtered view, used for dimming
-  const [viewSelection] = usePanelStatePartial("viewSelection", null, true);
   const clearSelection = useClearLassoSelection();
 
   // Drop stale selection state when the dataset changes
@@ -160,7 +157,9 @@ export function usePlotSelection() {
 
   // Memoized so that the trace memo in Panel only invalidates when the
   // selection actually changes.
-  // Selection priority: checked samples > lasso selection > view filtering
+  // Selection priority: checked samples > lasso selection. View-filter
+  // dimming is index-based (viewBitmask) and handled in the Panel, where
+  // it is outranked by any id selection here.
   const resolvedSelection = useMemo(() => {
     if (selectedSamples.size) {
       return Array.from(selectedSamples);
@@ -168,11 +167,8 @@ export function usePlotSelection() {
     if (lassoSelection?.length) {
       return lassoSelection;
     }
-    if (viewSelection?.length) {
-      return viewSelection;
-    }
     return null;
-  }, [selectedSamples, lassoSelection, viewSelection]);
+  }, [selectedSamples, lassoSelection]);
 
   return {
     handleSelected,
