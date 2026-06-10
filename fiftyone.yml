@@ -9,8 +9,6 @@ author: "Harpreet Sahota"
 # Python operators
 operators:
   - load_visualization_results
-  - apply_selection_from_plot
-  - create_extended_stage
   - get_view_samples
 
 # TypeScript/React panels
