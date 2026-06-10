@@ -114,7 +114,15 @@ export function useCursorZoom(
 
       const camera = scene.getCamera();
       const { eye, center, up } = camera;
-      const anchor = pickAnchor(gd, e.clientX, e.clientY);
+      const zoomingIn = f < 1;
+      // Only re-anchor the orbit pivot (camera center) when zooming IN.
+      // On zoom-OUT, moving the center toward the cursor pushes it
+      // *beyond* its current position (factor f > 1), so repeated
+      // zoom-outs at scattered cursor positions drift the pivot outside
+      // the point cloud — after which orbiting swings the whole cloud
+      // across the screen and feels like panning. Zoom-out therefore
+      // dollies around the existing center (pivot stays on the data).
+      const anchor = zoomingIn ? pickAnchor(gd, e.clientX, e.clientY) : null;
 
       if (scene.camera._ortho) {
         // Ortho zoom = scaling the aspectratio (camera distance has no
@@ -149,7 +157,9 @@ export function useCursorZoom(
 
       // Perspective: scale eye AND center toward the anchor; the
       // anchored point's projection is invariant under this transform,
-      // and the camera distance scales by f exactly like a plain dolly
+      // and the camera distance scales by f exactly like a plain dolly.
+      // anchor is null on zoom-out (and over empty space), where this
+      // degenerates to a pure dolly around the existing center.
       const distance = Math.hypot(
         eye.x - center.x,
         eye.y - center.y,

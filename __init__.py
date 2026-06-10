@@ -30,6 +30,11 @@ _SELECTION_TAG = "3d-embeddings-selection"
 # MongoDB's command document limit)
 _TAG_WRITE_BATCH = 50000
 
+# Points per geometry chunk. Each chunk is ~2-3 MB of base64 float32
+# (x/y/z), small enough to keep individual trigger payloads snappy while
+# large datasets stream in a few dozen messages
+_GEOMETRY_CHUNK_SIZE = 250000
+
 _BRAIN_RESULTS_CACHE_SIZE = 4
 _brain_results_cache = OrderedDict()
 _brain_results_lock = threading.Lock()
@@ -63,8 +68,20 @@ def _load_brain_results(dataset, brain_key):
     return results
 
 
+def _encode_f32(values):
+    """Encodes a 1D array as base64 little-endian float32 bytes."""
+    arr = np.ascontiguousarray(values, dtype="<f4")
+    return base64.b64encode(arr.tobytes()).decode("ascii")
+
+
 class LoadVisualizationResults(foo.Operator):
-    """Load visualization geometry from FiftyOne Brain results.
+    """Stream visualization geometry from FiftyOne Brain results.
+
+    Geometry is sent as base64 float32 chunks (a meta trigger followed by
+    ``set_plot_data_chunk`` triggers): O(1) decode on the client and ~5x
+    smaller than JSON number arrays. Sample ids are intentionally NOT
+    sent — they dominate the payload and the frontend works purely in
+    point indices, resolving ids server-side on demand (hover, selection).
 
     Embeddings of any dimensionality >= 2 are supported: the first three
     dimensions are visualized (matching the builtin Embeddings panel,
@@ -82,10 +99,14 @@ class LoadVisualizationResults(foo.Operator):
             label="Load 3D Visualization Results",
             description="Load embeddings visualization from brain results",
             unlisted=True,
+            execute_as_generator=True,
         )
 
     def execute(self, ctx):
         brain_key = ctx.params.get("brain_key")
+        # Echoed in every trigger so the frontend can discard chunks from
+        # a superseded stream (eg after a quick brain-key switch)
+        source = f"{ctx.dataset.name}::{brain_key}"
 
         try:
             results = _load_brain_results(ctx.dataset, brain_key)
@@ -98,24 +119,45 @@ class LoadVisualizationResults(foo.Operator):
                     "at least 2 dimensions are required."
                 )
 
-            data = {
-                "x": points[:, 0].tolist(),
-                "y": points[:, 1].tolist(),
-                # 2D embeddings render as a flat plane (viewed top-down)
-                "z": points[:, 2].tolist()
-                if num_dims >= 3
-                else [0.0] * len(points),
-                "sample_ids": list(results.sample_ids),
-                "num_dims": num_dims,
-            }
+            count = len(points)
+            num_chunks = max(
+                1, -(-count // _GEOMETRY_CHUNK_SIZE)  # ceil division
+            )
+
+            yield ctx.trigger(
+                f"{_PLUGIN_URI}/set_plot_data_meta",
+                params={
+                    "source": source,
+                    "count": count,
+                    "num_dims": num_dims,
+                    "num_chunks": num_chunks,
+                },
+            )
+
+            for chunk_index in range(num_chunks):
+                start = chunk_index * _GEOMETRY_CHUNK_SIZE
+                end = min(count, start + _GEOMETRY_CHUNK_SIZE)
+                params = {
+                    "source": source,
+                    "chunk_index": chunk_index,
+                    "num_chunks": num_chunks,
+                    "start": start,
+                    "size": end - start,
+                    "x": _encode_f32(points[start:end, 0]),
+                    "y": _encode_f32(points[start:end, 1]),
+                }
+                # 2D embeddings render as a flat plane (z stays zeroed
+                # client-side); skipping z saves a third of the payload
+                if num_dims >= 3:
+                    params["z"] = _encode_f32(points[start:end, 2])
+
+                yield ctx.trigger(
+                    f"{_PLUGIN_URI}/set_plot_data_chunk", params=params
+                )
         except Exception as e:
-            ctx.trigger(
+            yield ctx.trigger(
                 f"{_PLUGIN_URI}/set_plot_error", params={"error": str(e)}
             )
-            return {"error": str(e)}
-
-        ctx.trigger(f"{_PLUGIN_URI}/set_plot_data", params={"plot_data": data})
-        return {}
 
 
 class GetPlotColors(foo.Operator):
@@ -189,31 +231,85 @@ class GetViewSamples(foo.Operator):
         return {"in_view": base64.b64encode(bytes(bitmask)).decode("ascii")}
 
 
-class GetSampleFilepath(foo.Operator):
-    """Resolve a sample's filepath for the hover thumbnail.
+def _get_index_map(results):
+    """Returns (and caches on the results object) the id -> point index
+    map for a brain run. Built once per cached results object."""
+    index_map = getattr(results, "_plugin_index_map", None)
+    if index_map is None:
+        index_map = {
+            sample_id: i for i, sample_id in enumerate(results.sample_ids)
+        }
+        results._plugin_index_map = index_map
+
+    return index_map
+
+
+class GetSampleInfo(foo.Operator):
+    """Resolve a point index to its sample id + filepath.
 
     Looked up per hover (and cached client-side) rather than shipping all
-    filepaths with the plot data, which does not scale to large datasets.
+    ids/filepaths with the plot data, which does not scale to large
+    datasets.
     """
 
     @property
     def config(self):
         return foo.OperatorConfig(
-            name="get_sample_filepath",
-            label="Get Sample Filepath",
-            description="Get the filepath of a sample",
+            name="get_sample_info",
+            label="Get Sample Info",
+            description="Get the sample id and filepath for a point",
             unlisted=True,
         )
 
     def execute(self, ctx):
-        sample_id = ctx.params.get("sample_id")
-        if not sample_id:
-            return {"filepath": None}
+        brain_key = ctx.params.get("brain_key")
+        index = ctx.params.get("index")
+        if brain_key is None or index is None:
+            return {"sample_id": None, "filepath": None}
 
+        results = _load_brain_results(ctx.dataset, brain_key)
+        if not 0 <= index < len(results.sample_ids):
+            return {"sample_id": None, "filepath": None}
+
+        sample_id = results.sample_ids[index]
         try:
-            return {"filepath": ctx.dataset[sample_id].filepath}
+            filepath = ctx.dataset[sample_id].filepath
         except KeyError:
-            return {"filepath": None}
+            # Sample deleted since the brain run
+            filepath = None
+
+        return {"sample_id": sample_id, "filepath": filepath}
+
+
+class GetSampleIndices(foo.Operator):
+    """Resolve sample ids to point indices (eg the grid's checked
+    samples, which the frontend only knows by id). Ids not in the brain
+    run are skipped.
+    """
+
+    @property
+    def config(self):
+        return foo.OperatorConfig(
+            name="get_sample_indices",
+            label="Get Sample Indices",
+            description="Map sample ids to point indices",
+            unlisted=True,
+        )
+
+    def execute(self, ctx):
+        brain_key = ctx.params.get("brain_key")
+        sample_ids = ctx.params.get("sample_ids") or []
+        if not brain_key:
+            return {"indices": []}
+
+        results = _load_brain_results(ctx.dataset, brain_key)
+        index_map = _get_index_map(results)
+        indices = [
+            index_map[sample_id]
+            for sample_id in sample_ids
+            if sample_id in index_map
+        ]
+        return {"indices": indices}
 
 
 class ApplySelection(foo.Operator):
@@ -230,11 +326,14 @@ class ApplySelection(foo.Operator):
     Kinds:
         lasso:  {brain_key, lasso: {polygon, camera, data_scale, rect}}
         class:  {brain_key, color_by, label} (presence semantics)
-        toggle: {sample_id} (tag-tier selections only)
+        toggle: {brain_key, index, current_ids} — current_ids is the
+                small-tier id list (or [] for no selection); null means
+                the current selection is tag-tier
         clear:  {} (removes the selection tag)
 
-    Returns ``{count, sample_ids}`` (small tier) or ``{count, tag}``
-    (tag tier).
+    Returns ``{count, sample_ids, indices}`` (small tier) or
+    ``{count, tag}`` (tag tier). The frontend works in point indices;
+    ids appear only inside Select view stages.
     """
 
     @property
@@ -253,18 +352,21 @@ class ApplySelection(foo.Operator):
             _clear_selection_tag(ctx.dataset)
             return {"count": 0}
 
-        if kind == "toggle":
-            return _toggle_selection_tag(
-                ctx.dataset, ctx.params.get("sample_id")
-            )
-
         brain_key = ctx.params.get("brain_key")
         results = _load_brain_results(ctx.dataset, brain_key)
 
+        if kind == "toggle":
+            return _toggle_selection(
+                ctx.dataset,
+                results,
+                ctx.params.get("index"),
+                ctx.params.get("current_ids"),
+            )
+
         if kind == "lasso":
-            sample_ids = _resolve_lasso(results, ctx.params.get("lasso"))
+            indices = _resolve_lasso(results, ctx.params.get("lasso"))
         elif kind == "class":
-            sample_ids = _resolve_class(
+            indices = _resolve_class(
                 ctx.dataset,
                 results,
                 ctx.params.get("color_by"),
@@ -276,11 +378,18 @@ class ApplySelection(foo.Operator):
         # Any new selection supersedes a previous tag-tier selection
         _clear_selection_tag(ctx.dataset)
 
-        count = len(sample_ids)
+        count = len(indices)
         if count <= _SELECTION_ID_THRESHOLD:
-            return {"count": count, "sample_ids": sample_ids}
+            sample_ids = [results.sample_ids[i] for i in indices]
+            return {
+                "count": count,
+                "sample_ids": sample_ids,
+                "indices": indices,
+            }
 
-        _write_selection_tag(ctx.dataset, sample_ids)
+        _write_selection_tag(
+            ctx.dataset, [results.sample_ids[i] for i in indices]
+        )
         return {"count": count, "tag": _SELECTION_TAG}
 
 
@@ -292,7 +401,7 @@ def _projection_matrix(values):
 
 
 def _resolve_lasso(results, lasso):
-    """Returns the sample ids whose projected screen positions fall
+    """Returns the point indices whose projected screen positions fall
     inside the lasso polygon.
 
     Same math as the frontend's lasso.ts (plotly gl3d/project.js), but
@@ -331,8 +440,7 @@ def _resolve_lasso(results, lasso):
     inside = _points_in_polygon(sx, sy, lasso["polygon"])
     inside &= w > 0  # Behind the camera
 
-    sample_ids = results.sample_ids
-    return [sample_ids[i] for i in np.flatnonzero(inside)]
+    return [int(i) for i in np.flatnonzero(inside)]
 
 
 def _points_in_polygon(x, y, polygon):
@@ -371,12 +479,12 @@ def _values_in_brain_order(dataset, results, field):
 
 
 def _resolve_class(dataset, results, color_by, label):
-    """Returns the brain-run sample ids whose ``color_by`` value CONTAINS
+    """Returns the point indices whose ``color_by`` value CONTAINS
     ``label`` (presence semantics, matching the legend counts)."""
     raw_values = _values_in_brain_order(dataset, results, color_by)
     return [
-        _id
-        for _id, value in zip(results.sample_ids, raw_values)
+        i
+        for i, value in enumerate(raw_values)
         if label in _presence_labels(value)
     ]
 
@@ -393,16 +501,52 @@ def _write_selection_tag(dataset, sample_ids):
         dataset.select(batch).tag_samples(_SELECTION_TAG)
 
 
-def _toggle_selection_tag(dataset, sample_id):
-    """Adds/removes one sample from a tag-tier selection."""
-    sample = dataset[sample_id]
-    if _SELECTION_TAG in sample.tags:
-        dataset.select([sample_id]).untag_samples(_SELECTION_TAG)
-    else:
-        dataset.select([sample_id]).tag_samples(_SELECTION_TAG)
+def _toggle_selection(dataset, results, index, current_ids):
+    """Adds/removes one point (by index) from the current selection.
 
-    count = dataset.match_tags(_SELECTION_TAG).count()
-    return {"count": count, "tag": _SELECTION_TAG}
+    ``current_ids`` is the frontend's small-tier id list ([] when there
+    is no selection); ``None`` means the selection is tag-tier and
+    membership lives in the dataset tag.
+    """
+    if index is None or not 0 <= index < len(results.sample_ids):
+        return {"count": 0}
+
+    sample_id = results.sample_ids[index]
+
+    if current_ids is None:
+        # Tag tier: toggle membership in the dataset tag
+        sample = dataset[sample_id]
+        if _SELECTION_TAG in sample.tags:
+            dataset.select([sample_id]).untag_samples(_SELECTION_TAG)
+        else:
+            dataset.select([sample_id]).tag_samples(_SELECTION_TAG)
+
+        count = dataset.match_tags(_SELECTION_TAG).count()
+        if count == 0:
+            return {"count": 0}
+        return {"count": count, "tag": _SELECTION_TAG}
+
+    # Small tier: toggle in the id list
+    ids = list(current_ids)
+    if sample_id in ids:
+        ids.remove(sample_id)
+    else:
+        ids.append(sample_id)
+
+    if not ids:
+        return {"count": 0}
+
+    if len(ids) > _SELECTION_ID_THRESHOLD:
+        _clear_selection_tag(dataset)
+        _write_selection_tag(dataset, ids)
+        return {"count": len(ids), "tag": _SELECTION_TAG}
+
+    index_map = _get_index_map(results)
+    return {
+        "count": len(ids),
+        "sample_ids": ids,
+        "indices": [index_map[_id] for _id in ids],
+    }
 
 
 def _compute_colors(raw_values):
@@ -551,5 +695,6 @@ def register(plugin):
     plugin.register(LoadVisualizationResults)
     plugin.register(GetPlotColors)
     plugin.register(GetViewSamples)
-    plugin.register(GetSampleFilepath)
+    plugin.register(GetSampleInfo)
+    plugin.register(GetSampleIndices)
     plugin.register(ApplySelection)

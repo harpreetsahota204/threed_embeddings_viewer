@@ -11,7 +11,8 @@ operators:
   - load_visualization_results
   - get_plot_colors
   - get_view_samples
-  - get_sample_filepath
+  - get_sample_info
+  - get_sample_indices
   - apply_selection
 
 # TypeScript/React panels

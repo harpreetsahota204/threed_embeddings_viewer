@@ -4,8 +4,14 @@ import * as fos from "@fiftyone/state";
 import { useOperatorExecutor } from "@fiftyone/operators";
 import { useBrainResult } from "./useBrainResult";
 import { useColorByField } from "./useLabelSelector";
-import { plotColorsAtom, plotDataAtom, plotErrorAtom } from "./State";
-import { resetSavedCamera } from "./cameraStore";
+import {
+  plotColorsAtom,
+  plotDataAtom,
+  plotErrorAtom,
+  plotProgressAtom,
+} from "./State";
+import { resetCameraStore } from "./cameraStore";
+import { logError, logInfo } from "./logger";
 
 // Module-level so they survive panel remounts: the App reloads the page
 // query on server "refresh" events and view changes, which remounts the
@@ -13,12 +19,20 @@ import { resetSavedCamera } from "./cameraStore";
 let requestedGeometry: string | null = null;
 let requestedColors: string | null = null;
 
+// Called by set_plot_error (Operator.ts) so a failed geometry stream can
+// be retried
+export function resetGeometryRequest() {
+  requestedGeometry = null;
+  requestedColors = null;
+}
+
 /**
  * Loads plot geometry when the dataset/brain key changes, and colors when
  * the color-by field changes. The two are fetched separately so that
  * recoloring does not re-transfer geometry (the dominant payload on large
- * datasets). Results arrive via the set_plot_data/set_plot_colors
- * triggers.
+ * datasets). Geometry streams in as base64 float32 chunks
+ * (set_plot_data_meta/set_plot_data_chunk); colors arrive via
+ * set_plot_colors.
  *
  * Note: this intentionally does NOT reload on view/filter changes; those
  * only affect dimming, which is handled by useSelectionEffect.
@@ -30,6 +44,7 @@ export function useLoadPlotEffect() {
   const setPlotData = useSetRecoilState(plotDataAtom);
   const setPlotColors = useSetRecoilState(plotColorsAtom);
   const setPlotError = useSetRecoilState(plotErrorAtom);
+  const setPlotProgress = useSetRecoilState(plotProgressAtom);
 
   const geometryExecutor = useOperatorExecutor(
     "@harpreetsahota/threed-embeddings/load_visualization_results"
@@ -38,7 +53,7 @@ export function useLoadPlotEffect() {
     "@harpreetsahota/threed-embeddings/get_plot_colors"
   );
 
-  // Geometry: x/y/z/sample_ids, depends only on the brain key
+  // Geometry: x/y/z chunks, depends only on the brain key
   useEffect(() => {
     if (!brainKey || !datasetName) {
       if (requestedGeometry !== null) {
@@ -47,6 +62,7 @@ export function useLoadPlotEffect() {
         setPlotData(null);
         setPlotColors(null);
         setPlotError(null);
+        setPlotProgress(null);
       }
       return;
     }
@@ -56,20 +72,23 @@ export function useLoadPlotEffect() {
       return;
     }
 
+    logInfo(`requesting geometry [${source}]`);
     requestedGeometry = source;
     requestedColors = null;
     setPlotData(null);
     setPlotColors(null);
     setPlotError(null);
+    setPlotProgress(null);
     // A different visualization should not inherit the previous camera
-    // (eg a 2D plane viewed through a 3D oblique camera)
-    resetSavedCamera();
+    // or aspectratio (eg a 2D plane viewed through a 3D oblique camera)
+    resetCameraStore();
 
     geometryExecutor.execute(
       { brain_key: brainKey },
       {
         callback: (result: any) => {
           if (result?.error) {
+            logError("geometry request failed", result.error);
             // Allow a retry after failures
             requestedGeometry = null;
           }
@@ -97,11 +116,13 @@ export function useLoadPlotEffect() {
       return;
     }
 
+    logInfo(`requesting colors [${source}]`);
     colorsExecutor.execute(
       { brain_key: brainKey, color_by: labelField },
       {
         callback: (result: any) => {
           if (result?.error) {
+            logError("colors request failed", result.error);
             requestedColors = null;
           }
         },

@@ -9,6 +9,7 @@ import {
   lassoSelectionAtom,
   lassoStageIdAtom,
 } from "./State";
+import { logError, logInfo } from "./logger";
 
 const SELECT_STAGE_CLS = "fiftyone.core.stages.Select";
 const MATCH_TAGS_STAGE_CLS = "fiftyone.core.stages.MatchTags";
@@ -176,7 +177,12 @@ export function usePlotSelection() {
     lastDataset = datasetName;
   }, [datasetName]);
 
-  function applyStage(stage: any, count: number, ids: string[] | null) {
+  function applyStage(
+    stage: any,
+    count: number,
+    ids: string[] | null,
+    indices: number[] | null
+  ) {
     // Only clear checked samples if there are any; redundant writes sync
     // to the server session and trigger page refreshes
     if (selectedSamples.size > 0) {
@@ -184,12 +190,17 @@ export function usePlotSelection() {
     }
 
     const otherStages = (view || []).filter((s) => s?._uuid !== stageId);
-    setLassoSelection({ count, ids });
+    setLassoSelection({ count, ids, indices });
     setStageId(stage._uuid);
     setView([...otherStages, stage]);
   }
 
   function applyResult(result: any) {
+    if (result?.error) {
+      logError("apply_selection failed", result.error);
+      return;
+    }
+
     const count = result?.count ?? 0;
     if (!count) {
       clearSelection();
@@ -197,19 +208,31 @@ export function usePlotSelection() {
     }
 
     const ids = result?.sample_ids ?? null;
-    applyStage(ids ? selectStage(ids) : matchTagsStage(), count, ids);
+    const indices = result?.indices ?? null;
+    logInfo(
+      `selection applied: ${count.toLocaleString()} samples ` +
+        `(${ids ? "Select stage" : "tag tier"})`
+    );
+    applyStage(
+      ids ? selectStage(ids) : matchTagsStage(),
+      count,
+      ids,
+      indices
+    );
   }
 
   // The execute() promise does not resolve with the result; results must
   // be read via the callback option
   const executeApply = (params: Record<string, unknown>) => {
     applyExecutor.execute(params, {
-      callback: (result: any) => applyResult(result?.result),
+      callback: (result: any) =>
+        applyResult(result?.result ?? { error: result?.error }),
     });
   };
 
   function handleLasso(polygon: Point2D[], projection: ProjectionParams) {
     if (!brainKey) return;
+    logInfo(`resolving lasso (${polygon.length} polygon points)`);
     executeApply({
       kind: "lasso",
       brain_key: brainKey,
@@ -221,6 +244,7 @@ export function usePlotSelection() {
   // sidebar label filters)
   function handleClassSelect(colorBy: string, label: string) {
     if (!brainKey) return;
+    logInfo(`resolving class selection: ${colorBy} = ${label}`);
     executeApply({
       kind: "class",
       brain_key: brainKey,
@@ -229,60 +253,39 @@ export function usePlotSelection() {
     });
   }
 
-  // Adds/removes a single point from the current selection (select mode
-  // click). Clearing the last point clears the whole selection.
-  function toggleSelected(sampleId: string) {
-    if (!lassoSelection || lassoSelection.ids) {
-      // Small tier: ids are local, toggle stays client-side
-      const current = lassoSelection?.ids ?? [];
-      const next = current.includes(sampleId)
-        ? current.filter((id) => id !== sampleId)
-        : [...current, sampleId];
+  // Adds/removes a single point (by index) from the current selection
+  // (select mode click). The server resolves the index to an id and
+  // returns the updated selection; clearing the last point clears the
+  // whole selection. current_ids null = tag tier (membership lives in
+  // the dataset tag), otherwise the small-tier id list.
+  function toggleSelected(index: number) {
+    if (!brainKey) return;
 
-      if (next.length === 0) {
-        clearSelection();
-      } else {
-        applyStage(selectStage(next), next.length, next);
-      }
-      return;
-    }
-
-    // Tag tier: membership lives server-side
-    applyExecutor.execute(
-      { kind: "toggle", sample_id: sampleId },
-      {
-        callback: (result: any) => {
-          const count = result?.result?.count ?? 0;
-          if (!count) {
-            clearSelection();
-            return;
-          }
-          // Fresh uuid so the view re-resolves the mutated tag
-          applyStage(matchTagsStage(), count, null);
-        },
-      }
-    );
+    const tagTier = lassoSelection !== null && lassoSelection.ids === null;
+    executeApply({
+      kind: "toggle",
+      brain_key: brainKey,
+      index,
+      current_ids: tagTier ? null : lassoSelection?.ids ?? [],
+    });
   }
 
   // Memoized so that the trace memo in Panel only invalidates when the
-  // selection actually changes.
-  // Bright-point priority: checked samples > small-tier lasso ids.
-  // Tag-tier and view-filter dimming are index-based (viewBitmask, which
-  // the stage change refreshes) and handled in the Panel.
-  const resolvedSelection = useMemo(() => {
-    if (selectedSamples.size) {
-      return Array.from(selectedSamples);
-    }
-    if (lassoSelection?.ids?.length) {
-      return lassoSelection.ids;
-    }
-    return null;
-  }, [selectedSamples, lassoSelection]);
+  // selection actually changes. Point styling is index-based; checked
+  // samples (grid checkboxes, id-based) are resolved to indices by
+  // useCheckedIndices in the Panel.
+  const selectionIndices = useMemo(
+    () =>
+      lassoSelection?.indices?.length
+        ? new Set(lassoSelection.indices)
+        : null,
+    [lassoSelection]
+  );
 
   return {
     handleLasso,
     handleClassSelect,
     toggleSelected,
-    resolvedSelection,
+    selectionIndices,
   };
 }

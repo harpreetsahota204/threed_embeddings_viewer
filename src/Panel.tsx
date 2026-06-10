@@ -28,7 +28,9 @@ import {
   useClearLassoSelection,
   usePlotSelection,
 } from './usePlotSelection';
+import { useCheckedIndices } from './useCheckedIndices';
 import { usePlot } from './usePlot';
+import { logError } from './logger';
 import LassoOverlay from './LassoOverlay';
 import TabIndicator from './TabIndicator';
 import EmbeddingsPanelIcon from './Icon';
@@ -40,12 +42,15 @@ import {
   projectPointToClient,
   Point2D,
 } from './lasso';
-import { decodeBitmask, testBit } from './bitmask';
+import { base64ToBytes } from './base64';
+import { testBit } from './bitmask';
 import { dimToward, minMax, numericToColors } from './colors';
 import { lassoSelectionAtom, PlotCategory } from './State';
 import {
+  getDefaultAspectratio,
   getSavedAspectratio,
   getSavedCamera,
+  recordDefaultAspectratio,
   setSavedAspectratio,
   setSavedCamera,
   resetSavedCamera,
@@ -63,9 +68,14 @@ const DEFAULT_CAMERA_2D = {
   projection: { type: 'orthographic' },
 };
 
-// Filepaths are looked up per hover (not shipped with the plot data, which
-// does not scale); cached here so each sample is fetched at most once
-const filepathCache = new Map<string, string | null>();
+// Sample ids/filepaths are looked up per hover by point index (not
+// shipped with the plot data, which does not scale); cached here so each
+// point is fetched at most once. Keyed by dataset::brainKey::index.
+interface SampleInfo {
+  sampleId: string | null;
+  filepath: string | null;
+}
+const sampleInfoCache = new Map<string, SampleInfo>();
 
 // plotly hardcodes the gl3d camera distance limits to [0.01, 100]
 // (gl3d/scene.js) — only ~250x zoom-in from the default camera. These
@@ -81,9 +91,7 @@ const HIDDEN_AXIS = {
   showbackground: false,
 };
 
-const Value = React.memo<{ value: string; className?: string }>(
-  ({ value }) => <>{value}</>
-);
+const Value = React.memo<{ value: string }>(({ value }) => <>{value}</>);
 
 const centerMessage = (children: React.ReactNode, color: string) => (
   <div
@@ -109,10 +117,12 @@ const ThreeDEmbeddingsPanel = () => {
   const brainResultSelector = useBrainResultsSelector();
   const labelSelector = useLabelSelector();
   const plotSelection = usePlotSelection();
-  const { plotData, plotColors, plotError } = usePlot();
-  const selectedSamples = useRecoilValue(fos.selectedSamples) as Set<string>;
+  const { plotData, plotColors, plotError, plotProgress } = usePlot();
+  const datasetName = useRecoilValue(fos.datasetName) as string;
   const lassoSelection = useRecoilValue(lassoSelectionAtom);
   const clearSelection = useClearLassoSelection();
+  // Grid-checked samples resolved to point indices (ids never live here)
+  const checkedIndices = useCheckedIndices(plotData);
 
   // Explore mode (default): orbit/zoom/hover, grab cursor, clicks inert.
   // Select mode: pointer cursor, click toggles a point, drag lassos.
@@ -159,10 +169,11 @@ const ThreeDEmbeddingsPanel = () => {
   );
 
   // Colors arrive separately from geometry; ignore them until they match
-  // the current geometry (eg while recoloring after a brain key switch)
+  // the current geometry (eg while recoloring after a brain key switch,
+  // or while geometry chunks are still streaming in)
   const activeColors = useMemo(() => {
     if (!plotData || !plotColors) return null;
-    return plotColors.labels.length === plotData.x.length ? plotColors : null;
+    return plotColors.labels.length === plotData.count ? plotColors : null;
   }, [plotData, plotColors]);
 
   // Legend click-to-highlight: class labels whose points stay bright while
@@ -180,10 +191,10 @@ const ThreeDEmbeddingsPanel = () => {
 
   const viewBitmask = useMemo(() => {
     if (!viewBitmaskB64 || !plotData) return null;
-    const bits = decodeBitmask(viewBitmaskB64);
+    const bits = base64ToBytes(viewBitmaskB64);
     // Guard against a stale bitmask from previous geometry (eg right
-    // after a brain key switch)
-    return bits.length === Math.ceil(plotData.x.length / 8) ? bits : null;
+    // after a brain key switch or while chunks are still streaming)
+    return bits.length === Math.ceil(plotData.count / 8) ? bits : null;
   }, [viewBitmaskB64, plotData]);
 
   // Per-category counts within the current view (presence semantics);
@@ -199,7 +210,7 @@ const ThreeDEmbeddingsPanel = () => {
     }
 
     const counts = new Array(activeColors.categories.length).fill(0);
-    for (let i = 0; i < plotData.x.length; i++) {
+    for (let i = 0; i < plotData.count; i++) {
       if (testBit(viewBitmask, i)) {
         for (const classIndex of activeColors.class_members[i]) {
           counts[classIndex]++;
@@ -240,7 +251,7 @@ const ThreeDEmbeddingsPanel = () => {
   const baseColors = useMemo(() => {
     if (!plotData) return null;
     if (!activeColors) {
-      return new Array(plotData.x.length).fill(UNIFORM_COLOR) as string[];
+      return new Array(plotData.count).fill(UNIFORM_COLOR) as string[];
     }
     if (activeColors.color_scheme === 'continuous') {
       return numericToColors(activeColors.colors!);
@@ -251,8 +262,6 @@ const ThreeDEmbeddingsPanel = () => {
 
   const plotTraces = useMemo(() => {
     if (!plotData || !baseColors) return [];
-
-    const resolvedSelection = plotSelection.resolvedSelection;
 
     // scatter3d does not support selectedpoints/selected/unselected, so
     // dimming is done with explicit per-point colors and sizes.
@@ -267,14 +276,14 @@ const ThreeDEmbeddingsPanel = () => {
     // (solid colors, since translucent scatter3d markers render with
     // blending artifacts).
     //
-    // Bright/dim tiers: an id selection (checked samples or lasso) beats
-    // view-filter dimming (index bitmask); class highlight applies only
-    // when neither is active.
-    const selectionSet = resolvedSelection
-      ? new Set(resolvedSelection)
-      : null;
-    const inSelection: ((i: number) => boolean) | null = selectionSet
-      ? (i) => selectionSet.has(plotData.sample_ids[i])
+    // All tiers are index-based (no ids client-side). Bright/dim
+    // priority: checked samples > lasso selection > view-filter bitmask;
+    // class highlight applies only when none of those are active.
+    const selectionIndices = plotSelection.selectionIndices;
+    const inSelection: ((i: number) => boolean) | null = checkedIndices
+      ? (i) => checkedIndices.has(i)
+      : selectionIndices
+      ? (i) => selectionIndices.has(i)
       : viewBitmask
       ? (i) => testBit(viewBitmask, i)
       : null;
@@ -343,12 +352,12 @@ const ThreeDEmbeddingsPanel = () => {
       });
     } else if (!inSelection) {
       colors = baseColors;
-      sizes = new Array(plotData.x.length).fill(BASE_SIZE);
+      sizes = new Array(plotData.count).fill(BASE_SIZE);
     } else {
       colors = [];
       sizes = [];
-      plotData.sample_ids.forEach((id, i) => {
-        if (selectedSamples.has(id)) {
+      for (let i = 0; i < plotData.count; i++) {
+        if (checkedIndices?.has(i)) {
           colors.push(SELECTED_COLOR);
           sizes.push(CHECKED_SIZE);
           addHalo(i, SELECTED_COLOR, CHECKED_SIZE);
@@ -360,44 +369,35 @@ const ThreeDEmbeddingsPanel = () => {
           colors.push(dimToward(baseColors[i], background, 0.8));
           sizes.push(DIMMED_SIZE);
         }
-      });
+      }
     }
 
     // Array marker sizes make plotly treat the trace as a bubble chart,
-    // whose marker.line defaults are width 1 in WHITE (Color.background).
-    // Disable outlines explicitly on both traces.
+    // whose marker.line defaults to width 1 in WHITE (Color.background);
+    // disable the outline explicitly. Hover is skipped because it is
+    // rendered by our own card via pointer-move picking.
+    const markerTrace = (
+      x: ArrayLike<number>,
+      y: ArrayLike<number>,
+      z: ArrayLike<number>,
+      color: string[],
+      size: number[],
+      opacity: number
+    ) => ({
+      type: 'scatter3d',
+      mode: 'markers',
+      x,
+      y,
+      z,
+      marker: { color, size, opacity, line: { width: 0 } },
+      hoverinfo: 'skip',
+      showlegend: false,
+    });
+
+    // Halo first so it renders beneath the main trace
     return [
-      {
-        type: 'scatter3d',
-        mode: 'markers',
-        x: halo.x,
-        y: halo.y,
-        z: halo.z,
-        marker: {
-          color: halo.colors,
-          size: halo.sizes,
-          opacity: 0.25,
-          line: { width: 0 },
-        },
-        hoverinfo: 'skip',
-        showlegend: false,
-      },
-      {
-        type: 'scatter3d',
-        mode: 'markers',
-        x: plotData.x,
-        y: plotData.y,
-        z: plotData.z,
-        marker: {
-          color: colors,
-          size: sizes,
-          opacity: 0.85,
-          line: { width: 0 },
-        },
-        // Hover is rendered by our own card via pointer-move picking
-        hoverinfo: 'skip',
-        showlegend: false,
-      },
+      markerTrace(halo.x, halo.y, halo.z, halo.colors, halo.sizes, 0.25),
+      markerTrace(plotData.x, plotData.y, plotData.z, colors, sizes, 0.85),
     ];
   }, [
     plotData,
@@ -405,8 +405,8 @@ const ThreeDEmbeddingsPanel = () => {
     activeColors,
     viewBitmask,
     highlightedClasses,
-    plotSelection.resolvedSelection,
-    selectedSamples,
+    plotSelection.selectionIndices,
+    checkedIndices,
     theme.background.mediaSpace,
     theme.background.level2,
   ]);
@@ -449,13 +449,20 @@ const ThreeDEmbeddingsPanel = () => {
   // canvas mouseup/wheel, so a zoom/rotate that ends off-canvas would be
   // lost on the next trace rebuild (the view "resets"). Snapshot the live
   // camera from the scene right before any selection-triggered rebuild,
-  // and keep both the module copy (for remounts) and plotly's layout
-  // object (for in-place rebuilds) in sync.
+  // and keep the module copy (for remounts), plotly's layout object (for
+  // in-place rebuilds), AND plotly's fullLayout record in sync — the
+  // last one is what plotly diffs against when deciding whether a layout
+  // camera change needs applying, and programmatic camera moves (cursor
+  // zoom) never update it on their own.
   const captureCamera = useCallback(() => {
     const camera = getScene()?.getCamera?.();
     if (camera) {
       setSavedCamera(camera);
       plotLayout.scene.camera = camera;
+      const fullLayout = plotRef.current?.el?._fullLayout;
+      if (fullLayout?.scene) {
+        fullLayout.scene.camera = camera;
+      }
     }
   }, [plotLayout, getScene]);
 
@@ -488,14 +495,21 @@ const ThreeDEmbeddingsPanel = () => {
   }, [getScene]);
 
   // The scene is recreated on every panel remount/brain-key switch;
-  // re-apply the limits once it exists
+  // re-apply the limits once it exists, and snapshot the pristine
+  // aspectratio (Reset View restores it after ortho zooming — but only
+  // when the scene was created WITHOUT a restored zoom)
   useEffect(() => {
     if (!plotData) return;
     let cancelled = false;
     const tryApply = () => {
       if (cancelled) return;
-      if (getScene()?.camera) {
+      const scene = getScene();
+      if (scene?.camera) {
         applyZoomLimits();
+        const aspect = scene.glplot?.getAspectratio?.();
+        if (aspect && !getSavedAspectratio()) {
+          recordDefaultAspectratio(aspect);
+        }
       } else {
         requestAnimationFrame(tryApply);
       }
@@ -561,10 +575,31 @@ const ThreeDEmbeddingsPanel = () => {
     handleCursorZoomed
   );
 
+  // Reset View applies the default camera IMPERATIVELY (scene.camera
+  // .lookAt) rather than relying on the uirevision bump alone: plotly
+  // only applies a layout camera when it differs from its own fullLayout
+  // record, and programmatic camera moves (cursor zoom) never enter that
+  // record — so after wheel zooming, a layout-driven reset is a no-op
+  // ("reset view sometimes does nothing").
   const handleResetView = useCallback(() => {
     resetSavedCamera();
+
+    const scene = getScene();
+    if (scene?.camera) {
+      const eye = is2D ? DEFAULT_CAMERA_2D.eye : DEFAULT_CAMERA.eye;
+      const up = is2D ? [0, 1, 0] : [0, 0, 1];
+      scene.camera.lookAt([eye.x, eye.y, eye.z], [0, 0, 0], up);
+    }
+
+    // Ortho (2D) zoom lives in the aspectratio; restore the pristine one
+    const defaultAspect = getDefaultAspectratio();
+    if (scene?.glplot && defaultAspect) {
+      scene.glplot.setAspectratio(defaultAspect);
+    }
+
+    applyZoomLimits();
     setCameraRev((rev) => rev + 1);
-  }, []);
+  }, [is2D, getScene, applyZoomLimits]);
 
   // Hover card for the pointed-at sample, positioned next to the
   // projected point in viewport coordinates. Hover is implemented with
@@ -667,7 +702,7 @@ const ThreeDEmbeddingsPanel = () => {
       }
 
       captureCamera();
-      plotSelection.toggleSelected(plotData.sample_ids[index]);
+      plotSelection.toggleSelected(index);
     },
     [plotData, plotSelection, captureCamera]
   );
@@ -722,40 +757,47 @@ const ThreeDEmbeddingsPanel = () => {
     [getScene]
   );
 
-  // Resolve the hovered sample's filepath lazily (one tiny request per
-  // first hover, cached afterwards)
-  const [hoverSrc, setHoverSrc] = useState<string | null>(null);
-  const getFilepathExecutor = useOperatorExecutor(
-    '@harpreetsahota/threed-embeddings/get_sample_filepath'
+  // Resolve the hovered point's sample id + filepath lazily by index
+  // (one tiny request per first hover, cached afterwards)
+  const [hoverInfo, setHoverInfo] = useState<SampleInfo | null>(null);
+  const getSampleInfoExecutor = useOperatorExecutor(
+    '@harpreetsahota/threed-embeddings/get_sample_info'
   );
 
   useEffect(() => {
-    if (hoverPreview === null || !plotData) {
-      setHoverSrc(null);
+    const brainKey = brainResultSelector.brainKey;
+    if (hoverPreview === null || !plotData || !brainKey) {
+      setHoverInfo(null);
       return;
     }
 
-    const sampleId = plotData.sample_ids[hoverPreview.index];
-    const toSrc = (filepath: string | null) =>
-      filepath ? (fos.getSampleSrc(filepath) as string) : null;
+    const index = hoverPreview.index;
+    const cacheKey = `${datasetName}::${brainKey}::${index}`;
 
-    const cached = filepathCache.get(sampleId);
+    const cached = sampleInfoCache.get(cacheKey);
     if (cached !== undefined) {
-      setHoverSrc(toSrc(cached));
+      setHoverInfo(cached);
       return;
     }
 
-    setHoverSrc(null);
+    setHoverInfo(null);
     let stale = false;
-    getFilepathExecutor.execute(
-      { sample_id: sampleId },
+    getSampleInfoExecutor.execute(
+      { brain_key: brainKey, index },
       {
         skipErrorNotification: true,
         callback: (result: any) => {
-          const filepath = result?.result?.filepath ?? null;
-          filepathCache.set(sampleId, filepath);
+          if (result?.error) {
+            logError('get_sample_info failed', result.error);
+            return;
+          }
+          const info: SampleInfo = {
+            sampleId: result?.result?.sample_id ?? null,
+            filepath: result?.result?.filepath ?? null,
+          };
+          sampleInfoCache.set(cacheKey, info);
           if (!stale) {
-            setHoverSrc(toSrc(filepath));
+            setHoverInfo(info);
           }
         },
       }
@@ -763,7 +805,11 @@ const ThreeDEmbeddingsPanel = () => {
     return () => {
       stale = true;
     };
-  }, [hoverPreview, plotData]);
+  }, [hoverPreview, plotData, datasetName, brainResultSelector.brainKey]);
+
+  const hoverSrc = hoverInfo?.filepath
+    ? (fos.getSampleSrc(hoverInfo.filepath) as string)
+    : null;
 
   // Min/max labels for the continuous colorscale legend
   const colorRange = useMemo(() => {
@@ -894,7 +940,9 @@ const ThreeDEmbeddingsPanel = () => {
               alignSelf: 'center',
             }}
           >
-            Points: {plotData.x.length.toLocaleString()}
+            Points: {plotData.count.toLocaleString()}
+            {plotProgress &&
+              ` (loading ${plotProgress.received}/${plotProgress.total})`}
           </div>
         )}
       </div>
@@ -926,7 +974,16 @@ const ThreeDEmbeddingsPanel = () => {
         )}
 
       {isLoading &&
-        centerMessage(<div>Loading visualization...</div>, theme.text.secondary)}
+        centerMessage(
+          <div>
+            Loading visualization...
+            {plotProgress &&
+              ` (${Math.round(
+                (plotProgress.received / plotProgress.total) * 100
+              )}%)`}
+          </div>,
+          theme.text.secondary
+        )}
 
       {!plotError && plotData && (
         <>
@@ -969,9 +1026,8 @@ const ThreeDEmbeddingsPanel = () => {
               y={hoverPreview.y}
               src={hoverSrc}
               lines={
-                activeColors?.labels[hoverPreview.index] ?? [
-                  plotData.sample_ids[hoverPreview.index],
-                ]
+                activeColors?.labels[hoverPreview.index] ??
+                (hoverInfo?.sampleId ? [hoverInfo.sampleId] : [])
               }
               theme={theme}
             />

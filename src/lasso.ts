@@ -129,7 +129,7 @@ export function pickNearestPoint(
 
   let best = -1;
   let bestDistance = radius;
-  for (let i = 0; i < plotData.sample_ids.length; i++) {
+  for (let i = 0; i < plotData.count; i++) {
     const screen = toClient(internals, plotData.x[i], plotData.y[i], plotData.z[i]);
     if (!screen) continue;
 

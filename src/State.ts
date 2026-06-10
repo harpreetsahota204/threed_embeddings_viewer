@@ -4,18 +4,29 @@
 
 import { atom } from 'recoil';
 
+// Geometry arrives as base64 float32 chunks and is held as typed arrays:
+// ~5x smaller on the wire than JSON numbers and no per-point boxing in
+// memory. Sample ids are never transferred — the frontend works in point
+// indices and resolves ids server-side on demand (hover, selection).
 // Geometry and colors are split so that recoloring (changing "Color by")
-// does not re-transfer x/y/z/ids, which dominate the payload on large
-// datasets
+// does not re-transfer geometry, which dominates the payload.
 export interface PlotData {
-  x: number[];
-  y: number[];
+  x: Float32Array;
+  y: Float32Array;
   // All zeros for 2D embeddings (rendered as a flat plane)
-  z: number[];
-  sample_ids: string[];
+  z: Float32Array;
+  // Number of valid points (may be less than the array capacity while
+  // chunks are still streaming in)
+  count: number;
   // Original embedding dimensionality (>= 4 still plots the first 3 dims,
   // matching the builtin 2D panel's first-2 behavior)
   num_dims: number;
+}
+
+// Geometry streaming progress; null when no load is in flight
+export interface PlotProgress {
+  received: number;
+  total: number;
 }
 
 export interface PlotCategory {
@@ -57,6 +68,11 @@ export const plotColorsAtom = atom<PlotColors | null>({
   default: null,
 });
 
+export const plotProgressAtom = atom<PlotProgress | null>({
+  key: 'threed-embeddings-plot-progress',
+  default: null,
+});
+
 export const plotErrorAtom = atom<string | null>({
   key: 'threed-embeddings-plot-error',
   default: null,
@@ -66,8 +82,10 @@ export interface LassoSelection {
   count: number;
   // Present only for small selections (applied as a Select stage); null
   // for large selections, which are server-side (tag + MatchTags stage)
-  // so that huge id lists never live in client state or view stages
+  // so that huge id lists never live in client state or view stages.
+  // ids feed the Select stage; indices drive point styling.
   ids: string[] | null;
+  indices: number[] | null;
 }
 
 // Lasso selection state lives in plain atoms (not panel state) because the
