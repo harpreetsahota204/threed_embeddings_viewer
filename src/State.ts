@@ -17,6 +17,9 @@ export interface PlotData {
 export interface PlotCategory {
   label: string;
   color: string;
+  // Number of samples CONTAINING the class (presence semantics, like the
+  // App sidebar) — rows can overlap, so counts may sum to more than the
+  // number of points
   count: number;
 }
 
@@ -27,10 +30,13 @@ export interface PlotColors {
   color_scheme: 'categorical' | 'continuous';
   // Continuous only: per-sample numeric values
   colors?: number[];
-  // Categorical only: classes (sorted by count desc) and per-sample
-  // indices into them
+  // Categorical only: classes sorted by count desc; class_indices is each
+  // sample's dominant class (drives point color), class_members is each
+  // sample's full set of present classes (drives legend counts,
+  // highlighting, and class filtering)
   categories?: PlotCategory[];
   class_indices?: number[];
+  class_members?: number[][];
 }
 
 // Plot data is delivered by the Python operators via ctx.trigger().

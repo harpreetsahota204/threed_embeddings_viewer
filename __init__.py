@@ -197,11 +197,18 @@ def _compute_colors(view, color_field):
     distribution as display lines (eg ["cat: 3", "dog: 2"]) while colors
     use the aggregate.
 
+    Categorical category counts use presence semantics (number of samples
+    containing the class), matching how the App sidebar filters labels.
+    Point colors still use the dominant (mode) class, since each point can
+    only have one color.
+
     Returns a dict shaped for the frontend:
         continuous:  {labels, colors (numbers), color_scheme}
-        categorical: {labels, categories, class_indices, color_scheme}
+        categorical: {labels, categories, class_indices, class_members,
+                      color_scheme}
     """
-    summaries = [_summarize(v) for v in view.values(color_field)]
+    raw_values = view.values(color_field)
+    summaries = [_summarize(v) for v in raw_values]
     class_values = [s[0] for s in summaries]
     hover_labels = [s[1] for s in summaries]
 
@@ -215,10 +222,15 @@ def _compute_colors(view, color_field):
             "color_scheme": "continuous",
         }
 
-    class_labels = [
-        str(v) if v is not None else "None" for v in class_values
-    ]
-    ordered = _by_count(Counter(class_labels))
+    # Unique classes present in each sample (presence semantics)
+    members = [_presence_labels(v) for v in raw_values]
+    # Dominant class per sample (point color)
+    dominant = [str(v) if v is not None else "None" for v in class_values]
+
+    presence_counts = Counter(
+        label for sample_labels in members for label in sample_labels
+    )
+    ordered = _by_count(presence_counts)
     palette = _generate_color_palette(len(ordered))
     index_map = {label: i for i, (label, _) in enumerate(ordered)}
 
@@ -229,7 +241,11 @@ def _compute_colors(view, color_field):
             {"label": label, "color": palette[i], "count": count}
             for i, (label, count) in enumerate(ordered)
         ],
-        "class_indices": [index_map[label] for label in class_labels],
+        "class_indices": [index_map[label] for label in dominant],
+        "class_members": [
+            [index_map[label] for label in sample_labels]
+            for sample_labels in members
+        ],
     }
 
 
@@ -261,6 +277,18 @@ def _summarize(value):
         lines.append(f"{others} other object{'s' if others > 1 else ''}")
 
     return mode, lines
+
+
+def _presence_labels(value):
+    """Returns the sorted unique class labels present in a raw value."""
+    if not isinstance(value, (list, tuple)):
+        return [str(value) if value is not None else "None"]
+
+    items = _flatten_list(value)
+    if not items:
+        return ["None"]
+
+    return sorted({str(v) for v in items})
 
 
 def _by_count(counter):

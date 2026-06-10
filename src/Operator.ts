@@ -17,7 +17,7 @@ import {
   PlotColors,
   PlotData,
 } from './State';
-import { logError } from './logger';
+import { log, logError } from './logger';
 
 class SetPlotData extends Operator {
   get config() {
@@ -69,12 +69,17 @@ class SetPlotColors extends Operator {
       data?.labels &&
       (data.color_scheme === 'continuous'
         ? data.colors
-        : data.categories && data.class_indices);
+        : data.categories && data.class_indices && data.class_members);
     if (!valid) {
       logError('set_plot_colors: invalid payload', params);
       return;
     }
 
+    log(
+      `recolor: set_plot_colors received (${data.labels.length} labels,`,
+      `scheme=${data.color_scheme},`,
+      `${data.categories?.length ?? 0} categories)`
+    );
     hooks.setPlotColors(data);
   }
 }

@@ -3,7 +3,11 @@ import { useRecoilValue } from "recoil";
 import * as fos from "@fiftyone/state";
 import { usePanelStatePartial } from "@fiftyone/spaces";
 
-export const useColorByField = () => usePanelStatePartial("colorByField", null);
+// local=true for the same reason as useBrainResult: non-local panel state
+// changes trigger a page-query reload (grid flicker) via the session
+// workspace sync
+export const useColorByField = () =>
+  usePanelStatePartial("colorByField", null, true);
 
 const UNCOLORED = "uncolored";
 

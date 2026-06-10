@@ -40,6 +40,7 @@ import {
 } from './lasso';
 import { dimToward, minMax, numericToColors } from './colors';
 import { lassoSelectionAtom, PlotCategory } from './State';
+import { log } from './logger';
 import './Operator';
 
 const SELECTED_COLOR = '#ff9800';
@@ -146,6 +147,39 @@ const ThreeDEmbeddingsPanel = () => {
     return plotColors.labels.length === plotData.x.length ? plotColors : null;
   }, [plotData, plotColors]);
 
+  // ── Recolor investigation instrumentation ──────────────────────────
+  // Remount tracking: a remount mid-recolor would reset component state
+  // and delay rendering
+  useEffect(() => {
+    log('panel mounted');
+    return () => log('panel unmounted');
+  }, []);
+
+  // Grid flicker correlate: the grid re-renders when the view/page query
+  // changes — color-by changes should NOT touch these
+  const view = useRecoilValue(fos.view) as any[];
+  const filters = useRecoilValue(fos.filters) as Record<string, unknown>;
+  useEffect(() => {
+    log(`view identity changed (${view?.length ?? 0} stages)`);
+  }, [view]);
+  useEffect(() => {
+    log(`filters identity changed (${Object.keys(filters ?? {}).length} keys)`);
+  }, [filters]);
+
+  // Legend populate moment: activeColors flipping from old->new is when
+  // the legend actually updates
+  useEffect(() => {
+    if (!activeColors) {
+      log('recolor: activeColors=null (uncolored or awaiting colors)');
+    } else {
+      log(
+        `recolor: activeColors applied (scheme=${activeColors.color_scheme},`,
+        `categories=${activeColors.categories?.length ?? 0})`
+      );
+    }
+  }, [activeColors]);
+  // ───────────────────────────────────────────────────────────────────
+
   // Legend click-to-highlight: class labels whose points stay bright while
   // everything else dims. Panel state so it survives remounts.
   const [highlightedClasses, setHighlightedClasses] = usePanelStatePartial(
@@ -158,12 +192,13 @@ const ThreeDEmbeddingsPanel = () => {
   // used here to adjust legend counts to the view
   const [viewSelection] = usePanelStatePartial('viewSelection', null, true);
 
-  // Per-category counts within the current view; null when unfiltered
+  // Per-category counts within the current view (presence semantics);
+  // null when unfiltered
   const viewCounts = useMemo(() => {
     if (
       !plotData ||
       !activeColors?.categories ||
-      !activeColors.class_indices ||
+      !activeColors.class_members ||
       !viewSelection?.length
     ) {
       return null;
@@ -173,7 +208,9 @@ const ThreeDEmbeddingsPanel = () => {
     const counts = new Array(activeColors.categories.length).fill(0);
     plotData.sample_ids.forEach((id, i) => {
       if (inView.has(id)) {
-        counts[activeColors.class_indices![i]]++;
+        for (const classIndex of activeColors.class_members![i]) {
+          counts[classIndex]++;
+        }
       }
     });
     return counts;
@@ -207,6 +244,7 @@ const ThreeDEmbeddingsPanel = () => {
   const plotTraces = useMemo(() => {
     if (!plotData) return [];
 
+    const t0 = performance.now();
     const resolvedSelection = plotSelection.resolvedSelection;
 
     // scatter3d does not support selectedpoints/selected/unselected, so
@@ -234,10 +272,11 @@ const ThreeDEmbeddingsPanel = () => {
     }
 
     // Class highlight (legend clicks): applies only when no sample
-    // selection/filter is active — any selection tier beats it
+    // selection/filter is active — any selection tier beats it. Presence
+    // semantics: a point is highlighted if it CONTAINS a highlighted class
     const highlightedIndexSet =
       !resolvedSelection &&
-      activeColors?.class_indices &&
+      activeColors?.class_members &&
       highlightedClasses?.length
         ? new Set(
             activeColors
@@ -284,8 +323,8 @@ const ThreeDEmbeddingsPanel = () => {
     if (highlightedIndexSet) {
       colors = [];
       sizes = [];
-      activeColors!.class_indices!.forEach((classIndex, i) => {
-        if (highlightedIndexSet.has(classIndex)) {
+      activeColors!.class_members!.forEach((memberIndices, i) => {
+        if (memberIndices.some((ci) => highlightedIndexSet.has(ci))) {
           colors.push(baseColors[i]);
           sizes.push(BASE_SIZE);
           addHalo(i, baseColors[i], BASE_SIZE);
@@ -317,6 +356,11 @@ const ThreeDEmbeddingsPanel = () => {
         }
       });
     }
+
+    log(
+      `plotTraces rebuilt: ${plotData.x.length} pts in`,
+      `${(performance.now() - t0).toFixed(1)}ms`
+    );
 
     return [
       {
@@ -605,8 +649,9 @@ const ThreeDEmbeddingsPanel = () => {
     return minMax(activeColors.colors!);
   }, [activeColors]);
 
-  // Shift-clicking a legend class selects its samples (same view-stage
-  // filter as a lasso of those points)
+  // Shift-clicking a legend class selects all samples CONTAINING it
+  // (presence semantics, like sidebar label filters), applied as the same
+  // view-stage filter as a lasso of those points
   const selectClass = useCallback(
     (label: string) => {
       if (!plotData || !activeColors?.categories) return;
@@ -616,8 +661,8 @@ const ThreeDEmbeddingsPanel = () => {
       );
       if (classIndex < 0) return;
 
-      const ids = plotData.sample_ids.filter(
-        (_, i) => activeColors.class_indices![i] === classIndex
+      const ids = plotData.sample_ids.filter((_, i) =>
+        activeColors.class_members![i].includes(classIndex)
       );
       captureCamera();
       plotSelection.handleSelected(ids);

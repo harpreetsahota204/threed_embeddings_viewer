@@ -4,7 +4,13 @@ import { useRecoilValue, useSetRecoilState } from "recoil";
 import { useColorByField } from "./useLabelSelector";
 import { plotErrorAtom } from "./State";
 
-export const useBrainResult = () => usePanelStatePartial("brainResult", null);
+// local=true: non-local panel state is serialized into the session
+// workspace, and the App responds to every change with a router.replace +
+// server mutation — re-executing the page query and flickering the grid
+// on every brain-key/color-by change. The cost of local is only that
+// saved workspaces don't persist these selections.
+export const useBrainResult = () =>
+  usePanelStatePartial("brainResult", null, true);
 
 export function useBrainResultsSelector() {
   const [selected, setSelected] = useBrainResult();
