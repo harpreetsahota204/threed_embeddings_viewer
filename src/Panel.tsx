@@ -44,10 +44,13 @@ import { decodeBitmask, testBit } from './bitmask';
 import { dimToward, minMax, numericToColors } from './colors';
 import { lassoSelectionAtom, PlotCategory } from './State';
 import {
+  getSavedAspectratio,
   getSavedCamera,
+  setSavedAspectratio,
   setSavedCamera,
   resetSavedCamera,
 } from './cameraStore';
+import { Aspectratio, useCursorZoom } from './useCursorZoom';
 import './Operator';
 
 const SELECTED_COLOR = '#ff9800';
@@ -63,6 +66,13 @@ const DEFAULT_CAMERA_2D = {
 // Filepaths are looked up per hover (not shipped with the plot data, which
 // does not scale); cached here so each sample is fetched at most once
 const filepathCache = new Map<string, string | null>();
+
+// plotly hardcodes the gl3d camera distance limits to [0.01, 100]
+// (gl3d/scene.js) — only ~250x zoom-in from the default camera. These
+// extend the range to "effectively infinite": the floor is set by
+// float32 GPU coordinates, which start to jitter below ~1e-4 of the
+// scene size anyway.
+const ZOOM_DISTANCE_LIMITS = [1e-5, 1000];
 
 const HIDDEN_AXIS = {
   visible: false,
@@ -403,8 +413,9 @@ const ThreeDEmbeddingsPanel = () => {
 
   const is2D = plotData?.num_dims === 2;
 
-  const plotLayout = useMemo(
-    () => ({
+  const plotLayout = useMemo(() => {
+    const savedAspect = getSavedAspectratio();
+    return {
       autosize: true,
       uirevision: cameraRev,
       margin: { l: 0, r: 0, t: 0, b: 0 },
@@ -417,12 +428,21 @@ const ThreeDEmbeddingsPanel = () => {
         camera:
           getSavedCamera() || (is2D ? DEFAULT_CAMERA_2D : DEFAULT_CAMERA),
         bgcolor: 'rgba(0,0,0,0)',
-      },
+        // Ortho (2D) zoom lives in the aspectratio; restore it across
+        // rebuilds/remounts just like the camera
+        ...(savedAspect
+          ? { aspectmode: 'manual', aspectratio: savedAspect }
+          : {}),
+      } as any,
       hovermode: false,
       paper_bgcolor: 'rgba(0,0,0,0)',
       plot_bgcolor: 'rgba(0,0,0,0)',
-    }),
-    [cameraRev, is2D]
+    };
+  }, [cameraRev, is2D]);
+
+  const getScene = useCallback(
+    () => plotRef.current?.el?._fullLayout?.scene?._scene,
+    []
   );
 
   // Plotly only writes the live camera back into the layout on a clean
@@ -432,13 +452,59 @@ const ThreeDEmbeddingsPanel = () => {
   // and keep both the module copy (for remounts) and plotly's layout
   // object (for in-place rebuilds) in sync.
   const captureCamera = useCallback(() => {
-    const camera =
-      plotRef.current?.el?._fullLayout?.scene?._scene?.getCamera?.();
+    const camera = getScene()?.getCamera?.();
     if (camera) {
       setSavedCamera(camera);
       plotLayout.scene.camera = camera;
     }
-  }, [plotLayout]);
+  }, [plotLayout, getScene]);
+
+  // "Infinizoom": widen plotly's hardcoded camera distance limits, and
+  // keep the near/far clip planes tracking the zoom level — zNear must
+  // shrink as the camera closes in (or nearby points clip away right
+  // when you zoom toward them), but a permanently tiny zNear destroys
+  // depth-buffer precision at normal zoom, so it scales with distance.
+  const applyZoomLimits = useCallback(() => {
+    const scene = getScene();
+    const view = scene?.camera?.view;
+    if (view?.setDistanceLimits) {
+      view.setDistanceLimits(
+        ZOOM_DISTANCE_LIMITS[0],
+        ZOOM_DISTANCE_LIMITS[1]
+      );
+    }
+
+    const glplot = scene?.glplot;
+    const camera = scene?.getCamera?.();
+    if (glplot && camera) {
+      const distance = Math.hypot(
+        camera.eye.x - camera.center.x,
+        camera.eye.y - camera.center.y,
+        camera.eye.z - camera.center.z
+      );
+      glplot.zNear = Math.min(0.01, Math.max(distance * 0.01, 1e-7));
+      glplot.zFar = Math.max(1000, distance * 4);
+    }
+  }, [getScene]);
+
+  // The scene is recreated on every panel remount/brain-key switch;
+  // re-apply the limits once it exists
+  useEffect(() => {
+    if (!plotData) return;
+    let cancelled = false;
+    const tryApply = () => {
+      if (cancelled) return;
+      if (getScene()?.camera) {
+        applyZoomLimits();
+      } else {
+        requestAnimationFrame(tryApply);
+      }
+    };
+    tryApply();
+    return () => {
+      cancelled = true;
+    };
+  }, [plotData, applyZoomLimits, getScene]);
 
   const handleRelayout = useCallback(
     (event: any) => {
@@ -447,8 +513,52 @@ const ThreeDEmbeddingsPanel = () => {
         setSavedCamera(camera);
         plotLayout.scene.camera = camera;
       }
+
+      // plotly's relayout tracking records scene.aspectratio as a "GUI
+      // edit" once our ortho cursor-zoom has changed it, but the
+      // uirevision code doesn't recognize aspectratio keys and logs
+      // "unrecognized GUI edit: scene.aspectratio.x" on every rebuild.
+      // We persist the aspectratio through the layout ourselves, so the
+      // tracking entries are redundant — drop them.
+      const preGUI = plotRef.current?.el?._fullLayout?._preGUI;
+      if (preGUI) {
+        for (const key of Object.keys(preGUI)) {
+          if (key.startsWith('scene.aspectratio')) {
+            delete preGUI[key];
+          }
+        }
+      }
+
+      // Fires on every wheel tick / drag end — keeps clip planes in
+      // sync with the zoom level
+      applyZoomLimits();
     },
-    [plotLayout]
+    [plotLayout, applyZoomLimits]
+  );
+
+  // After every cursor-zoom step: persist the camera (the zoom is
+  // applied programmatically, so plotly emits no relayout) and keep the
+  // clip planes tracking the new distance
+  const handleCursorZoomed = useCallback(
+    (aspect: Aspectratio | null) => {
+      captureCamera();
+      if (aspect) {
+        setSavedAspectratio(aspect);
+        plotLayout.scene.aspectmode = 'manual';
+        plotLayout.scene.aspectratio = aspect;
+      }
+      applyZoomLimits();
+    },
+    [captureCamera, plotLayout, applyZoomLimits]
+  );
+
+  const plotAreaRef = useRef<HTMLDivElement>(null);
+  useCursorZoom(
+    plotAreaRef,
+    plotRef,
+    plotData,
+    ZOOM_DISTANCE_LIMITS,
+    handleCursorZoomed
   );
 
   const handleResetView = useCallback(() => {
@@ -608,10 +718,8 @@ const ThreeDEmbeddingsPanel = () => {
   }, [grabbing]);
 
   const getCanvas = useCallback(
-    () =>
-      (plotRef.current?.el?._fullLayout?.scene?._scene?.glplot?.canvas ??
-        null) as HTMLCanvasElement | null,
-    []
+    () => (getScene()?.glplot?.canvas ?? null) as HTMLCanvasElement | null,
+    [getScene]
   );
 
   // Resolve the hovered sample's filepath lazily (one tiny request per
@@ -825,6 +933,7 @@ const ThreeDEmbeddingsPanel = () => {
           {/* Explore mode: grab cursor (grabbing while rotating);
               double-click enters select mode */}
           <div
+            ref={plotAreaRef}
             style={{
               position: 'absolute',
               inset: 0,

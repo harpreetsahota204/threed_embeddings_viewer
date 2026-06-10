@@ -4,7 +4,11 @@ import * as fos from "@fiftyone/state";
 import { useOperatorExecutor } from "@fiftyone/operators";
 import { useBrainResult } from "./useBrainResult";
 import { ProjectionParams, Point2D } from "./lasso";
-import { lassoSelectionAtom, lassoStageIdAtom } from "./State";
+import {
+  LassoSelection,
+  lassoSelectionAtom,
+  lassoStageIdAtom,
+} from "./State";
 
 const SELECT_STAGE_CLS = "fiftyone.core.stages.Select";
 const MATCH_TAGS_STAGE_CLS = "fiftyone.core.stages.MatchTags";
@@ -48,6 +52,23 @@ function matchTagsStage() {
 }
 
 /**
+ * Returns a callback that removes the selection tag from the dataset if
+ * (and only if) the given selection is tag-tier. Fire-and-forget.
+ */
+function useUntagSelection() {
+  const applyExecutor = useOperatorExecutor(APPLY_SELECTION_URI);
+
+  return useCallback((selection: LassoSelection | null) => {
+    if (selection && !selection.ids) {
+      applyExecutor.execute(
+        { kind: "clear" },
+        { skipErrorNotification: true }
+      );
+    }
+  }, []);
+}
+
+/**
  * Clears the lasso selection and removes the plugin's view stage. For
  * tag-tier selections, also removes the selection tag from the dataset.
  * Safe to use outside of the panel context (eg the tab indicator), since
@@ -62,16 +83,11 @@ export function useClearLassoSelection() {
   const [stageId, setStageId] = useRecoilState(lassoStageIdAtom);
   const [lassoSelection, setLassoSelection] =
     useRecoilState(lassoSelectionAtom);
-  const applyExecutor = useOperatorExecutor(APPLY_SELECTION_URI);
+  const untagSelection = useUntagSelection();
 
   return useCallback(() => {
     // Tag-tier selections leave a tag on the dataset; remove it
-    if (lassoSelection && !lassoSelection.ids) {
-      applyExecutor.execute(
-        { kind: "clear" },
-        { skipErrorNotification: true }
-      );
-    }
+    untagSelection(lassoSelection);
     setLassoSelection(null);
     if (stageId) {
       setStageId(null);
@@ -98,7 +114,7 @@ export function useLassoStageWatchdog() {
   const [stageId, setStageId] = useRecoilState(lassoStageIdAtom);
   const [lassoSelection, setLassoSelection] =
     useRecoilState(lassoSelectionAtom);
-  const applyExecutor = useOperatorExecutor(APPLY_SELECTION_URI);
+  const untagSelection = useUntagSelection();
 
   const armedStageRef = useRef<string | null>(null);
   useEffect(() => {
@@ -113,15 +129,10 @@ export function useLassoStageWatchdog() {
     } else if (armedStageRef.current === stageId) {
       armedStageRef.current = null;
       setStageId(null);
-      if (lassoSelection && !lassoSelection.ids) {
-        applyExecutor.execute(
-          { kind: "clear" },
-          { skipErrorNotification: true }
-        );
-      }
+      untagSelection(lassoSelection);
       setLassoSelection(null);
     }
-  }, [view, stageId, lassoSelection]);
+  }, [view, stageId, lassoSelection, untagSelection]);
 }
 
 /**

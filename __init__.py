@@ -136,18 +136,9 @@ class GetPlotColors(foo.Operator):
 
         try:
             results = _load_brain_results(ctx.dataset, brain_key)
-
-            # One unordered values() fetch + dict reorder. Embedding the
-            # run's ids in select(ordered=True) does not scale: the ids
-            # blow up the aggregation pipeline and ordered selection is
-            # effectively quadratic in MongoDB. Samples since deleted
-            # from the dataset color as "None" rather than silently
-            # misaligning the colors array.
-            ids, values = ctx.dataset.values(["id", color_by])
-            values_by_id = dict(zip(ids, values))
-            raw_values = [
-                values_by_id.get(_id) for _id in results.sample_ids
-            ]
+            raw_values = _values_in_brain_order(
+                ctx.dataset, results, color_by
+            )
             plot_colors = _compute_colors(raw_values)
         except Exception as e:
             ctx.trigger(
@@ -365,16 +356,28 @@ def _points_in_polygon(x, y, polygon):
     return inside
 
 
+def _values_in_brain_order(dataset, results, field):
+    """Returns per-sample values of ``field`` in brain-result order.
+
+    One unordered values() fetch + dict reorder. Embedding the run's ids
+    in select(ordered=True) does not scale: the ids blow up the
+    aggregation pipeline and ordered selection is effectively quadratic
+    in MongoDB. Samples since deleted from the dataset yield ``None``
+    rather than silently misaligning the output.
+    """
+    ids, values = dataset.values(["id", field])
+    values_by_id = dict(zip(ids, values))
+    return [values_by_id.get(_id) for _id in results.sample_ids]
+
+
 def _resolve_class(dataset, results, color_by, label):
     """Returns the brain-run sample ids whose ``color_by`` value CONTAINS
     ``label`` (presence semantics, matching the legend counts)."""
-    ids, values = dataset.values(["id", color_by])
-    values_by_id = dict(zip(ids, values))
-
+    raw_values = _values_in_brain_order(dataset, results, color_by)
     return [
         _id
-        for _id in results.sample_ids
-        if label in _presence_labels(values_by_id.get(_id))
+        for _id, value in zip(results.sample_ids, raw_values)
+        if label in _presence_labels(value)
     ]
 
 

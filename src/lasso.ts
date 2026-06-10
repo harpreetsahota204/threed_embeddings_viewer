@@ -78,6 +78,31 @@ function toClient(
   };
 }
 
+/**
+ * Maps a data point into the camera's world space — the space that
+ * `scene.getCamera()`'s eye/center coordinates live in (dataScale, then
+ * the scene model matrix). Used to anchor cursor-centered zoom.
+ */
+export function dataToCameraSpace(
+  gd: any,
+  x: number,
+  y: number,
+  z: number
+): number[] | null {
+  const scene = gd?._fullLayout?.scene?._scene;
+  const glplot = scene?.glplot;
+  if (!glplot?.cameraParams?.model || !scene.dataScale) return null;
+
+  const [sx, sy, sz] = scene.dataScale as number[];
+  const v = xformMatrix(glplot.cameraParams.model, [
+    x * sx,
+    y * sy,
+    z * sz,
+    1,
+  ]);
+  return [v[0] / v[3], v[1] / v[3], v[2] / v[3]];
+}
+
 /** Projects a single data point to client (viewport) coordinates */
 export function projectPointToClient(
   gd: any,
