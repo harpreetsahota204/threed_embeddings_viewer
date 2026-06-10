@@ -2,7 +2,7 @@
  * State management for 3D Embeddings Viewer
  */
 
-import { atom, selector } from 'recoil';
+import { atom } from 'recoil';
 
 export interface PlotData {
   x: number[];
@@ -14,18 +14,15 @@ export interface PlotData {
   color_scheme: 'categorical' | 'continuous' | 'uniform';
 }
 
-// Main plot data atom (managed by operators via ctx.trigger())
+// Plot data is delivered by the Python operator via ctx.trigger().
+// These are plain recoil atoms (not panel state) because triggered JS
+// operators execute outside of the panel context.
 export const plotDataAtom = atom<PlotData | null>({
   key: 'threed-embeddings-plot-data',
   default: null,
 });
 
-// Selector for number of points
-export const numPointsSelector = selector<number>({
-  key: 'threed-embeddings-num-points',
-  get: ({ get }) => {
-    const plotData = get(plotDataAtom);
-    return plotData ? plotData.x.length : 0;
-  },
+export const plotErrorAtom = atom<string | null>({
+  key: 'threed-embeddings-plot-error',
+  default: null,
 });
-

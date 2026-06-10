@@ -1,65 +1,48 @@
 import { usePanelStatePartial } from "@fiftyone/spaces";
 import * as fos from "@fiftyone/state";
-import { useRecoilValue } from "recoil";
+import { useRecoilValue, useSetRecoilState } from "recoil";
 import { useColorByField } from "./useLabelSelector";
+import { plotErrorAtom } from "./State";
 
-// React hooks for brain result selection
 export const useBrainResult = () => usePanelStatePartial("brainResult", null);
-export const usePointsField = () => usePanelStatePartial("pointsField", null);
 
 export function useBrainResultsSelector() {
   const [selected, setSelected] = useBrainResult();
   const dataset = useRecoilValue(fos.dataset);
-  const [colorByField, setColorByField] = useColorByField();
-  const [loadingPlotError, setLoadingPlotError] = usePanelStatePartial(
-    "loadingPlotError",
-    null,
-    true
-  );
+  const [, setColorByField] = useColorByField();
+  const setPlotError = useSetRecoilState(plotErrorAtom);
 
   const handlers = {
-    onSelect(selected) {
+    onSelect(selected: string) {
       setSelected(selected);
       setColorByField(null); // Reset color when brain key changes
-      setLoadingPlotError(null);
+      setPlotError(null);
     },
     value: selected,
-    useSearch: (search) => ({
+    useSearch: (search: string) => ({
       values: getBrainKeysFromDataset(dataset).filter((item) =>
         item.toLowerCase().includes(search.toLowerCase())
       ),
     }),
   };
 
-  const hasSelection = selected !== null;
-
   return {
     handlers,
     brainKey: selected,
-    canSelect: countValid3DBrainMethods(dataset) > 0,
-    hasSelection: hasSelection,
-    hasLoadingError: loadingPlotError !== null,
-    showPlot: !loadingPlotError && hasSelection,
+    canSelect: getBrainKeysFromDataset(dataset).length > 0,
+    hasSelection: selected !== null,
   };
 }
 
-export function getBrainKeysFromDataset(dataset) {
-  if (!dataset || !dataset.brainMethods) return [];
-  
+function getBrainKeysFromDataset(dataset: any): string[] {
+  if (!dataset?.brainMethods) return [];
+
   return dataset.brainMethods
     .filter(isVisualizationConfig)
-    .map((item) => item.key);
+    .map((item: any) => item.key);
 }
 
-function countValid3DBrainMethods(dataset) {
-  const methods = dataset?.brainMethods || [];
-  return methods.filter(isVisualizationConfig).length;
+function isVisualizationConfig(item: any) {
+  // 2D vs 3D is validated when loading; list all visualizations here
+  return !!item.config?.cls?.includes("fiftyone.brain.visualization");
 }
-
-function isVisualizationConfig(item) {
-  // Just check if it's a visualization config - let user choose any visualization
-  // We'll handle 2D vs 3D gracefully when loading
-  if (!item.config) return false;
-  return item.config.cls && item.config.cls.includes("fiftyone.brain.visualization");
-}
-

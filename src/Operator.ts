@@ -1,27 +1,20 @@
 /**
- * TypeScript Operators for 3D Embeddings Viewer
- * Following FiftyOne JS plugin patterns from:
- * https://docs.voxel51.com/plugins/developing_plugins.html#developing-js-plugins
+ * JS operators that receive data pushed from the Python operators via
+ * ctx.trigger(). They write to plain recoil atoms because triggered
+ * operators execute outside of the panel context.
  */
 
 import {
   Operator,
   OperatorConfig,
-  ExecutionContext,
   registerOperator,
 } from '@fiftyone/operators';
 import { useSetRecoilState } from 'recoil';
-import { usePanelStatePartial } from '@fiftyone/spaces';
-import {
-  plotDataAtom,
-  PlotData,
-} from './State';
+import { plotDataAtom, plotErrorAtom, PlotData } from './State';
+import { log, logError } from './logger';
 
-/**
- * Operator to receive and store plot data from Python operator
- */
 class SetPlotData extends Operator {
-  get config(): OperatorConfig {
+  get config() {
     return new OperatorConfig({
       name: 'set_plot_data',
       label: 'Set Plot Data',
@@ -30,32 +23,30 @@ class SetPlotData extends Operator {
   }
 
   useHooks() {
-    const setPlotData = useSetRecoilState(plotDataAtom);
-    return { setPlotData };
+    return {
+      setPlotData: useSetRecoilState(plotDataAtom),
+      setPlotError: useSetRecoilState(plotErrorAtom),
+    };
   }
 
-  async execute({ hooks, params }: ExecutionContext) {
-    try {
-      const data = params.plot_data as PlotData;
-
-      if (!data || !data.x || !data.y || !data.z) {
-        throw new Error('Invalid plot data received');
-      }
-
-      hooks.setPlotData(data);
-      return { success: true };
-    } catch (error: any) {
-      console.error('Failed to set plot data:', error);
-      return { success: false, error: error.message };
+  async execute({ hooks, params }: any) {
+    const data = params.plot_data as PlotData;
+    if (!data?.x || !data?.y || !data?.z) {
+      logError('set_plot_data: invalid payload', params);
+      hooks.setPlotError('Invalid plot data received');
+      return;
     }
+
+    log(
+      `set_plot_data: received ${data.x.length} pts, scheme=${data.color_scheme}`
+    );
+    hooks.setPlotData(data);
+    hooks.setPlotError(null);
   }
 }
 
-/**
- * Operator to handle errors from Python operator
- */
 class SetPlotError extends Operator {
-  get config(): OperatorConfig {
+  get config() {
     return new OperatorConfig({
       name: 'set_plot_error',
       label: 'Set Plot Error',
@@ -65,26 +56,15 @@ class SetPlotError extends Operator {
 
   useHooks() {
     return {
-      setLoadingPlotError: usePanelStatePartial("loadingPlotError", null, true)[1],
+      setPlotError: useSetRecoilState(plotErrorAtom),
     };
   }
 
-  async execute({ hooks, params }: ExecutionContext) {
-    try {
-      const error = params.error;
-      hooks.setLoadingPlotError({
-        message: error,
-        stack: '',
-      });
-      return { success: true };
-    } catch (error: any) {
-      console.error('Failed to set plot error:', error);
-      return { success: false, error: error.message };
-    }
+  async execute({ hooks, params }: any) {
+    logError('set_plot_error:', params.error);
+    hooks.setPlotError(params.error || 'Unknown error');
   }
 }
 
-// Register operators with the plugin namespace
 registerOperator(SetPlotData, '@harpreetsahota/threed-embeddings');
 registerOperator(SetPlotError, '@harpreetsahota/threed-embeddings');
-

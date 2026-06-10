@@ -1,90 +1,64 @@
+import { useMemo } from "react";
 import { useRecoilValue } from "recoil";
 import * as fos from "@fiftyone/state";
 import { usePanelStatePartial } from "@fiftyone/spaces";
-import { useEffect, useState } from "react";
-import { useBrainResult } from "./useBrainResult";
 
 export const useColorByField = () => usePanelStatePartial("colorByField", null);
 
-// Hook to get available color by choices
-export function useColorByChoices() {
-  const datasetName = useRecoilValue(fos.datasetName);
-  const [brainKey] = useBrainResult();
-  const view = useRecoilValue(fos.view);
-  const slices = useRecoilValue(fos.currentSlices(false));
-  const [loadedPlot] = usePanelStatePartial("loadedPlot", null, true);
-  const dataset = useRecoilValue(fos.dataset);
-  const fullSchema = useRecoilValue(fos.fullSchema);
+const UNCOLORED = "uncolored";
 
-  const [isLoading, setIsLoading] = useState(false);
-  const [availableFields, setAvailableFields] = useState(null);
+const PRIMITIVE_FTYPES = [
+  "fiftyone.core.fields.StringField",
+  "fiftyone.core.fields.BooleanField",
+  "fiftyone.core.fields.IntField",
+  "fiftyone.core.fields.FloatField",
+];
 
-  useEffect(() => {
-    if (loadedPlot && brainKey && dataset && fullSchema) {
-      setIsLoading(true);
-      
-      // Get available fields from schema
-      const fields = ["uncolored"];
-      
-      // Add sample fields
-      if (fullSchema) {
-        Object.keys(fullSchema).forEach(fieldName => {
-          const field = fullSchema[fieldName];
-          // Add basic fields
-          fields.push(fieldName);
-          
-          // Add nested fields for classifications/detections
-          if (field.ftype && field.ftype.includes("Classification")) {
-            fields.push(`${fieldName}.label`);
-            fields.push(`${fieldName}.confidence`);
-          }
-          if (field.ftype && field.ftype.includes("Detections")) {
-            fields.push(`${fieldName}.detections.label`);
-            fields.push(`${fieldName}.detections.confidence`);
-          }
-        });
-      }
-      
-      setAvailableFields(fields);
-      setIsLoading(false);
+const SKIP_FIELDS = ["filepath", "tags", "metadata"];
+
+function getColorByChoices(fullSchema: any): string[] {
+  const fields = [UNCOLORED];
+
+  for (const [name, field] of Object.entries<any>(fullSchema || {})) {
+    if (SKIP_FIELDS.includes(name)) continue;
+
+    const docType = field.embeddedDocType || "";
+    if (docType.endsWith(".Classification")) {
+      fields.push(`${name}.label`, `${name}.confidence`);
+    } else if (docType.endsWith(".Detections")) {
+      fields.push(`${name}.detections.label`, `${name}.detections.confidence`);
+    } else if (PRIMITIVE_FTYPES.includes(field.ftype)) {
+      fields.push(name);
     }
-  }, [datasetName, brainKey, view, slices, loadedPlot, dataset, fullSchema]);
+  }
 
-  return {
-    availableFields,
-    isLoading,
-  };
+  return fields;
 }
 
 export function useLabelSelector() {
-  const dataset = useRecoilValue(fos.dataset);
   const fullSchema = useRecoilValue(fos.fullSchema);
   const [label, setLabel] = useColorByField();
-  const { availableFields, isLoading } = useColorByChoices();
+
+  const availableFields = useMemo(
+    () => getColorByChoices(fullSchema),
+    [fullSchema]
+  );
 
   const handlers = {
-    onSelect(selected) {
-      if (selected === "uncolored") {
-        selected = null;
-      }
-      setLabel(selected);
+    onSelect(selected: string) {
+      setLabel(selected === UNCOLORED ? null : selected);
     },
     value: label,
-    toKey: (item) => item,
-    useSearch: (search) => ({
-      values:
-        availableFields &&
-        availableFields.filter((item) =>
-          item.toLowerCase().includes(search.toLowerCase())
-        ),
+    toKey: (item: string) => item,
+    useSearch: (search: string) => ({
+      values: availableFields.filter((item) =>
+        item.toLowerCase().includes(search.toLowerCase())
+      ),
     }),
   };
 
   return {
     label,
     handlers,
-    isLoading,
-    canSelect: !isLoading && availableFields && availableFields.length > 0,
   };
 }
-

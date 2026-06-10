@@ -1,24 +1,14 @@
-import { usePanelStatePartial } from "@fiftyone/spaces";
-import { useViewChangeEffect } from "./useViewChangeEffect";
-import { useSelectionEffect } from "./useSelectionEffect";
 import { useRecoilValue } from "recoil";
-import { plotDataAtom } from "./State";
+import { plotDataAtom, plotErrorAtom } from "./State";
+import { useLoadPlotEffect } from "./useLoadPlotEffect";
+import { useSelectionEffect } from "./useSelectionEffect";
 
 export function usePlot() {
-  const [loadedPlot] = usePanelStatePartial("loadedPlot", null, true);
-  const [loadingPlot] = usePanelStatePartial("loadingPlot", true, true);
-  const plotData = useRecoilValue(plotDataAtom);
-
-  // Auto-refetch when view changes
-  useViewChangeEffect();
-  
-  // Update plotSelection based on view/filters for dimming effect
+  useLoadPlotEffect();
   useSelectionEffect();
 
   return {
-    plotData,
-    isLoading: loadingPlot,
-    isLoaded: !!loadedPlot,
+    plotData: useRecoilValue(plotDataAtom),
+    plotError: useRecoilValue(plotErrorAtom),
   };
 }
-
