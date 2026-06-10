@@ -353,6 +353,9 @@ const ThreeDEmbeddingsPanel = () => {
       });
     }
 
+    // Array marker sizes make plotly treat the trace as a bubble chart,
+    // whose marker.line defaults are width 1 in WHITE (Color.background).
+    // Disable outlines explicitly on both traces.
     return [
       {
         type: 'scatter3d',
@@ -360,7 +363,12 @@ const ThreeDEmbeddingsPanel = () => {
         x: halo.x,
         y: halo.y,
         z: halo.z,
-        marker: { color: halo.colors, size: halo.sizes, opacity: 0.25 },
+        marker: {
+          color: halo.colors,
+          size: halo.sizes,
+          opacity: 0.25,
+          line: { width: 0 },
+        },
         hoverinfo: 'skip',
         showlegend: false,
       },
@@ -370,7 +378,12 @@ const ThreeDEmbeddingsPanel = () => {
         x: plotData.x,
         y: plotData.y,
         z: plotData.z,
-        marker: { color: colors, size: sizes, opacity: 0.85 },
+        marker: {
+          color: colors,
+          size: sizes,
+          opacity: 0.85,
+          line: { width: 0 },
+        },
         // Hover is rendered by our own card via pointer-move picking
         hoverinfo: 'skip',
         showlegend: false,
