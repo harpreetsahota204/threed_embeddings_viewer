@@ -32,7 +32,7 @@ import {
 } from './usePlotSelection';
 import { useCheckedIndices } from './useCheckedIndices';
 import { usePlot } from './usePlot';
-import { logError, logDebug } from './logger';
+import { logError } from './logger';
 import LassoOverlay from './LassoOverlay';
 import TabIndicator from './TabIndicator';
 import EmbeddingsPanelIcon from './Icon';
@@ -60,7 +60,11 @@ import {
   initialViewState,
   pointAt,
 } from './deckScene';
-import { HOVER_PICK_INTERVAL_MS, pickPointIndex } from './plotPick';
+import {
+  HOVER_PICK_INTERVAL_MS,
+  HOVER_INFO_DEBOUNCE_MS,
+  pickPointIndex,
+} from './plotPick';
 import './Operator';
 
 // Sample id, filepath, and hover lines are looked up per hover by point
@@ -561,75 +565,47 @@ const ThreeDEmbeddingsPanel = () => {
     setHoverInfo(null);
     let stale = false;
 
-    // DEBUG: trace the hover thumbnail request/response.
-    logDebug('get_sample_info -> request', { brainKey, index, colorBy });
-
-    getSampleInfoExecutor.execute(
-      {
-        brain_key: brainKey,
-        index,
-        ...(colorBy ? { color_by: colorBy } : {}),
-      },
-      {
-        skipErrorNotification: true,
-        callback: (result: any) => {
-          if (result?.error) {
-            logError('get_sample_info failed', result.error);
-            // DEBUG: surface the full server error for the thumbnail path.
-            logDebug('get_sample_info -> ERROR', {
-              index,
-              error: result.error,
-            });
-            return;
-          }
-          const filepath = result?.result?.filepath ?? null;
-          // DEBUG: is the server returning a browser-loadable URL, or a
-          // raw cloud URI (gs://, s3://, ...) that an <img> cannot load?
-          const scheme =
-            typeof filepath === 'string'
-              ? (filepath.match(/^(\w+):\/\//)?.[1] ?? '(local/relative)')
-              : '(none)';
-          logDebug('get_sample_info -> ok', {
-            index,
-            sampleId: result?.result?.sample_id ?? null,
-            filepath,
-            scheme,
-            isCloudUri: ['gs', 's3', 'az', 'azure', 'gcp'].includes(scheme),
-            hoverLines: result?.result?.hover_lines ?? null,
-            serverDebug: result?.result?._debug ?? null,
-          });
-          const info: SampleInfo = {
-            sampleId: result?.result?.sample_id ?? null,
-            filepath,
-            hoverLines: result?.result?.hover_lines ?? null,
-          };
-          sampleInfoCache.set(cacheKey, info);
-          if (!stale) {
-            setHoverInfo(info);
-          }
+    // Wait for the cursor to settle before requesting: sweeping past a
+    // point shouldn't fire a get_sample_info operator call for it. Each
+    // intermediate hoverPreview reruns this effect and clears the pending
+    // timer below, so only the point the cursor rests on is fetched.
+    const timer = setTimeout(() => {
+      getSampleInfoExecutor.execute(
+        {
+          brain_key: brainKey,
+          index,
+          ...(colorBy ? { color_by: colorBy } : {}),
         },
-      }
-    );
+        {
+          skipErrorNotification: true,
+          callback: (result: any) => {
+            if (result?.error) {
+              logError('get_sample_info failed', result.error);
+              return;
+            }
+            const info: SampleInfo = {
+              sampleId: result?.result?.sample_id ?? null,
+              filepath: result?.result?.filepath ?? null,
+              hoverLines: result?.result?.hover_lines ?? null,
+            };
+            sampleInfoCache.set(cacheKey, info);
+            if (!stale) {
+              setHoverInfo(info);
+            }
+          },
+        }
+      );
+    }, HOVER_INFO_DEBOUNCE_MS);
+
     return () => {
       stale = true;
+      clearTimeout(timer);
     };
   }, [hoverPreview, plotData, datasetName, brainKey, labelSelector.label]);
 
   const hoverSrc = hoverInfo?.filepath
     ? (fos.getSampleSrc(hoverInfo.filepath) as string)
     : null;
-
-  // DEBUG: the exact string handed to the <img src>. If this is a gs://
-  // (or other cloud) URI, the browser will fail with ERR_UNKNOWN_URL_SCHEME.
-  useEffect(() => {
-    if (hoverInfo?.filepath) {
-      logDebug('hover <img> src', {
-        filepath: hoverInfo.filepath,
-        resolvedSrc: hoverSrc,
-        unchangedByGetSampleSrc: hoverSrc === hoverInfo.filepath,
-      });
-    }
-  }, [hoverInfo, hoverSrc]);
 
   // Min/max labels for the continuous colorscale legend
   const colorRange = useMemo(() => {

@@ -9,7 +9,7 @@ import {
   lassoSelectionAtom,
   lassoStageIdAtom,
 } from "./State";
-import { logError, logInfo, logDebug } from "./logger";
+import { logError, logInfo } from "./logger";
 
 const SELECT_STAGE_CLS = "fiftyone.core.stages.Select";
 const MATCH_TAGS_STAGE_CLS = "fiftyone.core.stages.MatchTags";
@@ -198,15 +198,8 @@ export function usePlotSelection() {
   function applyResult(result: any) {
     if (result?.error) {
       logError("apply_selection failed", result.error);
-      logDebug("apply_selection -> ERROR", { error: result.error });
       return;
     }
-
-    logDebug("apply_selection -> ok", {
-      count: result?.count ?? 0,
-      hasIds: Array.isArray(result?.sample_ids),
-      serverDebug: result?._debug ?? null,
-    });
 
     const count = result?.count ?? 0;
     if (!count) {
