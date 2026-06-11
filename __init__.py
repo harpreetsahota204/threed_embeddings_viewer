@@ -295,11 +295,13 @@ class GetSampleInfo(foo.Operator):
             return empty
 
         sample_id = results.sample_ids[index]
+        debug = None
         try:
-            filepath = _resolve_media_url(ctx.dataset, sample_id)
+            filepath, debug = _resolve_media_url(ctx.dataset, sample_id)
         except KeyError:
             # Sample deleted since the brain run
             filepath = None
+            debug = {"error": "sample deleted since brain run (KeyError)"}
 
         hover_lines = None
         if color_by:
@@ -310,6 +312,7 @@ class GetSampleInfo(foo.Operator):
             "sample_id": sample_id,
             "filepath": filepath,
             "hover_lines": hover_lines,
+            "_debug": debug,
         }
 
 
@@ -336,12 +339,27 @@ class GetSampleIndices(foo.Operator):
 
         results = _load_brain_results(ctx.dataset, brain_key)
         index_map = _get_index_map(results)
+
+        # The crash "unhashable type: 'list'" means some elements of
+        # sample_ids are not strings (eg lists/objects). Capture the exact
+        # shape into _debug (surfaced to the browser console) and only look
+        # up hashable string ids so we don't 500 while diagnosing.
+        non_string = [s for s in sample_ids if not isinstance(s, str)]
+        debug = {
+            "received_count": len(sample_ids),
+            "non_string_count": len(non_string),
+            "non_string_samples": [
+                {"type": type(s).__name__, "value": s} for s in non_string[:5]
+            ],
+            "first_five": sample_ids[:5],
+        }
+
         indices = [
             index_map[sample_id]
             for sample_id in sample_ids
-            if sample_id in index_map
+            if isinstance(sample_id, str) and sample_id in index_map
         ]
-        return {"indices": indices}
+        return {"indices": indices, "_debug": debug}
 
 
 class ApplySelection(foo.Operator):
@@ -411,18 +429,20 @@ class ApplySelection(foo.Operator):
         _clear_selection_tag(ctx.dataset)
 
         count = len(indices)
+        debug = {"kind": kind, "count": count}
         if count <= _SELECTION_ID_THRESHOLD:
             sample_ids = [results.sample_ids[i] for i in indices]
             return {
                 "count": count,
                 "sample_ids": sample_ids,
                 "indices": indices,
+                "_debug": debug,
             }
 
         _write_selection_tag(
             ctx.dataset, [results.sample_ids[i] for i in indices]
         )
-        return {"count": count, "tag": _SELECTION_TAG}
+        return {"count": count, "tag": _SELECTION_TAG, "_debug": debug}
 
 
 def _projection_matrix(values):
@@ -653,25 +673,48 @@ def _resolve_media_url(dataset, sample_id):
     (``_create_media_urls``); on open source the raw local/path is
     returned and the App serves it through the ``/media`` proxy. Falls
     back to the raw filepath if resolution is unavailable.
+
+    Returns ``(url, debug)``. ``debug`` is a small dict describing what
+    happened server-side, surfaced to the browser console for debugging
+    (it never changes the resolved url).
     """
+    import traceback as _traceback
+
+    debug = {
+        "raw_filepath": None,
+        "signing_attempted": False,
+        "signed": False,
+        "resolved_url": None,
+        "error": None,
+    }
+
     sample = dataset[sample_id]
     filepath = sample.filepath
+    debug["raw_filepath"] = filepath
 
     try:
         import fiftyone.core.media as fom
         import fiftyone.server.metadata as fosm
 
+        debug["signing_attempted"] = True
         media_type = fom.get_media_type(filepath)
         _, _, media_urls = fosm._create_media_urls(
             dataset, sample.to_mongo_dict(), media_type, cache={}
         )
+        debug["media_urls"] = media_urls
         for entry in media_urls:
             if entry.get("field") == "filepath" and entry.get("url"):
-                return entry["url"]
-    except Exception:
-        pass
+                debug["signed"] = True
+                debug["resolved_url"] = entry["url"]
+                return entry["url"], debug
+    except Exception as e:
+        debug["error"] = (
+            "".join(_traceback.format_exception_only(type(e), e)).strip()
+        )
+        debug["traceback"] = _traceback.format_exc()
 
-    return filepath
+    debug["resolved_url"] = filepath
+    return filepath, debug
 
 
 def _summarize(value):
