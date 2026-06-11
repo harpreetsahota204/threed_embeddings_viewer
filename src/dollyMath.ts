@@ -47,9 +47,9 @@ export function viewDirection(
   target: [number, number, number],
   camera: [number, number, number]
 ): [number, number, number] {
-  let vx = target[0] - camera[0];
-  let vy = target[1] - camera[1];
-  let vz = target[2] - camera[2];
+  const vx = target[0] - camera[0];
+  const vy = target[1] - camera[1];
+  const vz = target[2] - camera[2];
   const len = Math.hypot(vx, vy, vz) || 1;
   return [vx / len, vy / len, vz / len];
 }

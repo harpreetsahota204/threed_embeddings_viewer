@@ -531,13 +531,22 @@ const ThreeDEmbeddingsPanel = () => {
     []
   );
 
+  // The far plane only needs to grow as you zoom into 3D (OrbitView zoom is
+  // a scale, so geometry enlarges toward the frustum). Quantize the zoom that
+  // feeds it so the OrbitView identity stays stable across a continuous zoom
+  // gesture: in fully-controlled mode, handing deck.gl a freshly-built `views`
+  // object every frame makes it re-derive the viewport and report a slightly
+  // different state back, which oscillates into visible camera jitter. 2D
+  // ignores zoom entirely, so it never rebuilds for a pan/zoom.
+  const farZoom = is2D ? 0 : Math.ceil(viewState?.zoom ?? 0);
+
   const view = useMemo(() => {
     const height =
       plotAreaRef.current?.clientHeight ||
       getCanvas()?.clientHeight ||
       700;
-    return buildOrbitView(!!is2D, bounds, viewState?.zoom ?? 0, height);
-  }, [is2D, bounds, viewState?.zoom, getCanvas]);
+    return buildOrbitView(!!is2D, bounds, farZoom, height);
+  }, [is2D, bounds, farZoom, getCanvas]);
 
   // Resolve the hovered point's sample id + filepath lazily by index
   // (one tiny request per first hover, cached afterwards)
@@ -647,6 +656,11 @@ const ThreeDEmbeddingsPanel = () => {
         position: 'relative',
         height: '100%',
         width: '100%',
+        // Clip to the panel box. The deck canvas fills this container, so if
+        // anything spills a pixel during interaction a scrollbar would appear,
+        // steal width, resize deck, and oscillate (scrollbar flicker + camera
+        // jitter). Hidden overflow breaks that loop.
+        overflow: 'hidden',
         // No background: inherit the spaces panel background, exactly
         // like the 2D embeddings panel
       }}
