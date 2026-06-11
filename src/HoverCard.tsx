@@ -73,6 +73,8 @@ const HoverCard = ({
         overflow: 'hidden',
         zIndex: 1000,
         pointerEvents: 'none',
+        userSelect: 'none',
+        WebkitUserSelect: 'none',
       }}
     >
       {src && (

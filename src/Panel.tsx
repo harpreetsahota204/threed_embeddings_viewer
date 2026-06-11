@@ -25,14 +25,16 @@ import * as fos from '@fiftyone/state';
 import { useRecoilValue } from 'recoil';
 import { DeckGL } from '@deck.gl/react';
 import { useBrainResultsSelector } from './useBrainResult';
+import { useSimilarityKeySelector } from './useSimilarityKey';
 import { useLabelSelector } from './useLabelSelector';
 import {
   useClearLassoSelection,
   usePlotSelection,
+  SIMILARITY_NEIGHBORS,
 } from './usePlotSelection';
 import { useCheckedIndices } from './useCheckedIndices';
 import { usePlot } from './usePlot';
-import { logError } from './logger';
+import { logError, logInfo } from './logger';
 import LassoOverlay from './LassoOverlay';
 import TabIndicator from './TabIndicator';
 import EmbeddingsPanelIcon from './Icon';
@@ -56,6 +58,7 @@ import {
   buildOrbitView,
   buildScatterLayers,
   buildSceneBuffers,
+  buildSimilarityLinkLayer,
   computeBounds,
   initialViewState,
   pointAt,
@@ -102,6 +105,7 @@ const ThreeDEmbeddingsPanel = () => {
   const deckRef = useRef<any>(null);
   const plotAreaRef = useRef<HTMLDivElement>(null);
   const brainResultSelector = useBrainResultsSelector();
+  const similaritySelector = useSimilarityKeySelector();
   const labelSelector = useLabelSelector();
   const plotSelection = usePlotSelection();
   const { plotData, plotColors, plotError, plotProgress } = usePlot();
@@ -109,13 +113,27 @@ const ThreeDEmbeddingsPanel = () => {
   const lassoSelection = useRecoilValue(lassoSelectionAtom);
   const clearSelection = useClearLassoSelection();
   const brainKey = brainResultSelector.brainKey;
+  const simKey = similaritySelector.simKey;
   // Grid-checked samples resolved to point indices (ids never live here)
   const checkedIndices = useCheckedIndices(plotData);
 
+  // Similarity neighbor highlight (source + k nearest neighbors). Lives in
+  // an atom inside usePlotSelection so it survives the panel remount that
+  // applying its Select view stage causes, and persists into explore mode.
+  const similarityFocus = plotSelection.similarityFocus;
+
+  // Default the similarity index when the dataset has exactly one.
+  useEffect(() => {
+    const keys = similaritySelector.keys;
+    if (keys.length === 1 && !simKey) {
+      similaritySelector.handlers.onSelect(keys[0]);
+    }
+  }, [similaritySelector.keys, simKey]);
+
   // Explore mode (default): orbit/zoom/hover, grab cursor, clicks inert.
-  // Select mode: pointer cursor, click toggles a point, drag lassos.
-  // Double-click switches between the two. Stored in panel state (not
-  // useState) so deferred page-query reloads, which remount the panel,
+  // Select mode: pointer cursor, click lights up nearest neighbors, drag
+  // lassos. Double-click switches between the two. Stored in panel state
+  // (not useState) so deferred page-query reloads, which remount the panel,
   // don't silently kick the user back to explore mode.
   const [selectMode, setSelectMode] = usePanelStatePartial(
     'selectMode',
@@ -274,8 +292,21 @@ const ThreeDEmbeddingsPanel = () => {
     return null;
   }, [checkedIndices, selectionIndices, viewBitmask]);
 
+  const similaritySceneFocus = useMemo(() => {
+    if (!similarityFocus) return null;
+    return {
+      sourceIndex: similarityFocus.sourceIndex,
+      neighborIndices: new Set(similarityFocus.neighbors.map((n) => n.index)),
+    };
+  }, [similarityFocus]);
+
   const highlightSet = useMemo(() => {
-    if (inSelection || !activeColors?.class_members || !highlightedClasses?.length) {
+    if (
+      similaritySceneFocus ||
+      inSelection ||
+      !activeColors?.class_members ||
+      !highlightedClasses?.length
+    ) {
       return null;
     }
     const labels = new Set(highlightedClasses);
@@ -284,7 +315,7 @@ const ThreeDEmbeddingsPanel = () => {
         .map((c, i) => (labels.has(c.label) ? i : -1))
         .filter((i) => i >= 0)
     );
-  }, [inSelection, activeColors, highlightedClasses]);
+  }, [similaritySceneFocus, inSelection, activeColors, highlightedClasses]);
 
   const sceneBuffers = useMemo(() => {
     if (!plotData || !positions || !baseRGB) return null;
@@ -296,6 +327,7 @@ const ThreeDEmbeddingsPanel = () => {
       checkedIndices,
       highlightSet,
       classMembers: activeColors?.class_members,
+      similarityFocus: similaritySceneFocus,
     });
   }, [
     plotData,
@@ -306,18 +338,28 @@ const ThreeDEmbeddingsPanel = () => {
     highlightSet,
     checkedIndices,
     backgroundRGB,
+    similaritySceneFocus,
   ]);
 
   const layers = useMemo(() => {
     if (!plotData || !positions || !sceneBuffers || !bounds) return [];
-    return buildScatterLayers({
+    const scatter = buildScatterLayers({
       count: plotData.count,
       positions,
       sceneBuffers,
       is2D: !!is2D,
       maxExtent: bounds.maxExtent,
     });
-  }, [plotData, positions, sceneBuffers, is2D, bounds]);
+    const link =
+      similarityFocus &&
+      buildSimilarityLinkLayer({
+        sourceIndex: similarityFocus.sourceIndex,
+        neighbors: similarityFocus.neighbors,
+        positions,
+        is2D: !!is2D,
+      });
+    return link ? [...scatter, link] : scatter;
+  }, [plotData, positions, sceneBuffers, is2D, bounds, similarityFocus]);
 
   // 2D: left-drag pans, no rotation (OrbitController defaults dragMode to
   // 'rotate', which makes left-drag rotate and leaves nothing for pan once
@@ -466,6 +508,10 @@ const ThreeDEmbeddingsPanel = () => {
     [plotData, plotSelection]
   );
 
+  // A single click in select mode lights up the clicked point's nearest
+  // neighbors and filters the grid to them (a drag is a lasso, routed
+  // through onComplete instead). The selection itself is owned by
+  // usePlotSelection so it shares the lasso's stage lifecycle.
   const handlePick = useCallback(
     (point: Point2D) => {
       const deck = deckRef.current;
@@ -473,11 +519,19 @@ const ThreeDEmbeddingsPanel = () => {
       if (!deck || !area) return;
 
       const index = pickPointIndex(deck, area, point.x, point.y);
-      if (index === null) return;
+      logInfo('similarity: select-mode click', {
+        clientX: point.x,
+        clientY: point.y,
+        pickedIndex: index,
+      });
+      if (index === null) {
+        clearSelection();
+        return;
+      }
 
-      plotSelection.toggleSelected(index);
+      plotSelection.handleSimilaritySelect(index, simKey);
     },
-    [plotSelection]
+    [plotSelection, simKey, clearSelection]
   );
 
   const handleSelectModeExit = useCallback(
@@ -497,6 +551,8 @@ const ThreeDEmbeddingsPanel = () => {
       if (highlightedClasses?.length) {
         setHighlightedClasses([]);
       }
+      // clearSelection also clears any similarity highlight (a similarity
+      // selection sets lassoSelection too)
       if (lassoSelection?.count) {
         clearSelection();
       }
@@ -707,6 +763,18 @@ const ThreeDEmbeddingsPanel = () => {
             />
           )}
 
+          {brainResultSelector.hasSelection && similaritySelector.canSelect && (
+            <Selector
+              cy="3d-embeddings-similarity-key"
+              {...similaritySelector.handlers}
+              placeholder="Similarity index"
+              overflow={true}
+              component={Value}
+              resultsPlacement="bottom-start"
+              containerStyle={selectorStyle}
+            />
+          )}
+
           {plotData && (
             <>
               <button
@@ -740,6 +808,12 @@ const ThreeDEmbeddingsPanel = () => {
             Points: {plotData.count.toLocaleString()}
             {plotProgress &&
               ` (loading ${plotProgress.received}/${plotProgress.total})`}
+            {simKey && selectMode && (
+              <span style={{ marginLeft: '0.75rem', opacity: 0.85 }}>
+                Click a point for {SIMILARITY_NEIGHBORS} nearest neighbors ·
+                drag to lasso
+              </span>
+            )}
           </div>
         )}
       </div>

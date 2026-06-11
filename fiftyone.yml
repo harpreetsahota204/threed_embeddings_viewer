@@ -13,6 +13,8 @@ operators:
   - get_view_samples
   - get_sample_info
   - get_sample_indices
+  - list_similarity_runs
+  - get_similar_neighbors
   - apply_selection
 
 # TypeScript/React panels

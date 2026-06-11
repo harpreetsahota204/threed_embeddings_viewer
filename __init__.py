@@ -347,6 +347,110 @@ class GetSampleIndices(foo.Operator):
         return {"indices": indices}
 
 
+class ListSimilarityRuns(foo.Operator):
+    """List the dataset's similarity brain runs.
+
+    The frontend ``dataset.brainMethods`` object does not reliably expose
+    a run's ``type``, so similarity runs are enumerated here using
+    ``list_brain_runs(type=fob.Similarity)`` — the authoritative filter.
+    """
+
+    @property
+    def config(self):
+        return foo.OperatorConfig(
+            name="list_similarity_runs",
+            label="List Similarity Runs",
+            description="List similarity brain runs for the dataset",
+            unlisted=True,
+        )
+
+    def execute(self, ctx):
+        import fiftyone.brain as fob
+
+        try:
+            keys = ctx.dataset.list_brain_runs(type=fob.Similarity)
+        except Exception:
+            keys = []
+
+        return {"keys": list(keys)}
+
+
+class GetSimilarNeighbors(foo.Operator):
+    """Return the k nearest neighbors of a point in embedding space.
+
+    Queries the dataset's similarity index (full-dimensional embeddings)
+    and maps neighbor sample ids back to point indices in the
+    visualization brain run so the frontend can highlight them and draw
+    links in the projected plot.
+    """
+
+    @property
+    def config(self):
+        return foo.OperatorConfig(
+            name="get_similar_neighbors",
+            label="Get Similar Neighbors",
+            description="Find nearest neighbors in a similarity index",
+            unlisted=True,
+        )
+
+    def execute(self, ctx):
+        brain_key = ctx.params.get("brain_key")
+        sim_key = ctx.params.get("sim_key")
+        index = ctx.params.get("index")
+        k = ctx.params.get("k", 3)
+        empty = {"source_index": index, "neighbors": []}
+
+        if brain_key is None or sim_key is None or index is None:
+            return empty
+
+        try:
+            k = int(k)
+        except (TypeError, ValueError):
+            k = 3
+        k = max(1, min(k, 50))
+
+        viz = _load_brain_results(ctx.dataset, brain_key)
+        if not 0 <= index < len(viz.sample_ids):
+            return empty
+
+        sample_id = viz.sample_ids[index]
+        empty = {"source_index": index, "source_id": sample_id, "neighbors": []}
+        sim = _load_brain_results(ctx.dataset, sim_key)
+        viz_index_map = _get_index_map(viz)
+
+        # No dist_field: sort_by_similarity validates it as a real field
+        # name (cannot start with "_") and writes it to the dataset. The
+        # sorted order is all we need — rank is the similarity signal and
+        # distances are not rendered.
+        try:
+            view = sim.sort_by_similarity(sample_id, k=k + 1)
+            neighbor_ids = view.values("id")
+        except Exception as e:
+            return {**empty, "error": str(e)}
+
+        # Sample ids are returned alongside plot indices so the frontend can
+        # both highlight the points (by index) and filter the grid to the
+        # source + neighbors (by id, applied as a Select view stage).
+        neighbors = []
+        for nid in neighbor_ids:
+            if nid == sample_id:
+                continue
+            plot_index = viz_index_map.get(nid)
+            if plot_index is None:
+                continue
+            neighbors.append(
+                {"index": plot_index, "id": nid, "rank": len(neighbors)}
+            )
+            if len(neighbors) >= k:
+                break
+
+        return {
+            "source_index": index,
+            "source_id": sample_id,
+            "neighbors": neighbors,
+        }
+
+
 class ApplySelection(foo.Operator):
     """Resolve and apply a plot selection entirely server-side.
 
@@ -778,4 +882,6 @@ def register(plugin):
     plugin.register(GetViewSamples)
     plugin.register(GetSampleInfo)
     plugin.register(GetSampleIndices)
+    plugin.register(ListSimilarityRuns)
+    plugin.register(GetSimilarNeighbors)
     plugin.register(ApplySelection)

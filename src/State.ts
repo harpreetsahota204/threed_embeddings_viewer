@@ -99,3 +99,19 @@ export const lassoStageIdAtom = atom<string | null>({
   key: 'threed-embeddings-lasso-stage-id',
   default: null,
 });
+
+// A similarity neighbor highlight (source point + its k nearest neighbors).
+// Drives the orange/amber point coloring and the connecting arcs. Held in
+// an atom (not panel/local state) because applying its Select view stage
+// reloads the page query and remounts the panel, which would otherwise drop
+// local state; the atom lets the highlight survive into explore mode so the
+// user can orbit with the constellation still lit.
+export interface SimilarityFocus {
+  sourceIndex: number;
+  neighbors: { index: number; rank: number }[];
+}
+
+export const similarityFocusAtom = atom<SimilarityFocus | null>({
+  key: 'threed-embeddings-similarity-focus',
+  default: null,
+});

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { useRecoilState, useRecoilValue } from "recoil";
+import { useRecoilState, useRecoilValue, useSetRecoilState } from "recoil";
 import * as fos from "@fiftyone/state";
 import { useOperatorExecutor } from "@fiftyone/operators";
 import { useBrainResult } from "./useBrainResult";
@@ -8,11 +8,19 @@ import {
   LassoSelection,
   lassoSelectionAtom,
   lassoStageIdAtom,
+  similarityFocusAtom,
+  SimilarityFocus,
 } from "./State";
 import { logError, logInfo } from "./logger";
 
 const SELECT_STAGE_CLS = "fiftyone.core.stages.Select";
 const MATCH_TAGS_STAGE_CLS = "fiftyone.core.stages.MatchTags";
+
+const GET_SIMILAR_NEIGHBORS_URI =
+  "@harpreetsahota/threed-embeddings/get_similar_neighbors";
+
+// Neighbors lit up by a single similarity click
+export const SIMILARITY_NEIGHBORS = 3;
 
 // Must match _SELECTION_TAG in __init__.py
 const SELECTION_TAG = "3d-embeddings-selection";
@@ -84,12 +92,14 @@ export function useClearLassoSelection() {
   const [stageId, setStageId] = useRecoilState(lassoStageIdAtom);
   const [lassoSelection, setLassoSelection] =
     useRecoilState(lassoSelectionAtom);
+  const setSimilarityFocus = useSetRecoilState(similarityFocusAtom);
   const untagSelection = useUntagSelection();
 
   return useCallback(() => {
     // Tag-tier selections leave a tag on the dataset; remove it
     untagSelection(lassoSelection);
     setLassoSelection(null);
+    setSimilarityFocus(null);
     if (stageId) {
       setStageId(null);
       setView((view || []).filter((s) => s?._uuid !== stageId));
@@ -115,6 +125,7 @@ export function useLassoStageWatchdog() {
   const [stageId, setStageId] = useRecoilState(lassoStageIdAtom);
   const [lassoSelection, setLassoSelection] =
     useRecoilState(lassoSelectionAtom);
+  const setSimilarityFocus = useSetRecoilState(similarityFocusAtom);
   const untagSelection = useUntagSelection();
 
   const armedStageRef = useRef<string | null>(null);
@@ -132,6 +143,7 @@ export function useLassoStageWatchdog() {
       setStageId(null);
       untagSelection(lassoSelection);
       setLassoSelection(null);
+      setSimilarityFocus(null);
     }
   }, [view, stageId, lassoSelection, untagSelection]);
 }
@@ -162,7 +174,10 @@ export function usePlotSelection() {
   const [lassoSelection, setLassoSelection] =
     useRecoilState(lassoSelectionAtom);
   const [stageId, setStageId] = useRecoilState(lassoStageIdAtom);
+  const [similarityFocus, setSimilarityFocus] =
+    useRecoilState(similarityFocusAtom);
   const applyExecutor = useOperatorExecutor(APPLY_SELECTION_URI);
+  const similarExecutor = useOperatorExecutor(GET_SIMILAR_NEIGHBORS_URI);
   const clearSelection = useClearLassoSelection();
 
   // Drop stale selection state when the dataset changes. The previous
@@ -173,6 +188,7 @@ export function usePlotSelection() {
     if (lastDataset !== null && lastDataset !== datasetName) {
       setLassoSelection(null);
       setStageId(null);
+      setSimilarityFocus(null);
     }
     lastDataset = datasetName;
   }, [datasetName]);
@@ -181,7 +197,8 @@ export function usePlotSelection() {
     stage: any,
     count: number,
     ids: string[] | null,
-    indices: number[] | null
+    indices: number[] | null,
+    focus: SimilarityFocus | null = null
   ) {
     // Only clear checked samples if there are any; redundant writes sync
     // to the server session and trigger page refreshes
@@ -191,6 +208,10 @@ export function usePlotSelection() {
 
     const otherStages = (view || []).filter((s) => s?._uuid !== stageId);
     setLassoSelection({ count, ids, indices });
+    // A lasso/class/toggle selection clears any similarity highlight; the
+    // similarity path passes its own focus to keep the source/neighbor
+    // coloring and arcs.
+    setSimilarityFocus(focus);
     setStageId(stage._uuid);
     setView([...otherStages, stage]);
   }
@@ -270,6 +291,84 @@ export function usePlotSelection() {
     });
   }
 
+  // Single click in select mode: light up the clicked point and its k
+  // nearest neighbors (orange/amber + arcs) AND filter the grid to those
+  // samples via a Select view stage — the same server-backed stage the
+  // lasso uses, so the highlight + grid filter survive the panel remount
+  // and persist into explore mode for orbiting. Clicking the current
+  // source again clears it.
+  function handleSimilaritySelect(index: number, simKey: string | null) {
+    if (!brainKey || !simKey) {
+      logInfo("similarity: skipped (missing prerequisite)", {
+        brainKey,
+        simKey,
+      });
+      return;
+    }
+
+    if (similarityFocus?.sourceIndex === index) {
+      logInfo("similarity: toggled off", { index });
+      clearSelection();
+      return;
+    }
+
+    logInfo("similarity: requesting neighbors", {
+      index,
+      brain_key: brainKey,
+      sim_key: simKey,
+      k: SIMILARITY_NEIGHBORS,
+    });
+
+    similarExecutor.execute(
+      {
+        brain_key: brainKey,
+        sim_key: simKey,
+        index,
+        k: SIMILARITY_NEIGHBORS,
+      },
+      {
+        skipErrorNotification: true,
+        callback: (result: any) => {
+          const payload = result?.result ?? {};
+          if (result?.error || payload.error) {
+            logError(
+              "similarity: failed",
+              result?.error ?? payload.error
+            );
+            return;
+          }
+
+          const neighbors = payload.neighbors ?? [];
+          logInfo("similarity: received neighbors", {
+            sourceIndex: index,
+            count: neighbors.length,
+            neighbors,
+          });
+          if (!neighbors.length) {
+            clearSelection();
+            return;
+          }
+
+          const sourceId = payload.source_id;
+          const ids = [
+            ...(sourceId ? [sourceId] : []),
+            ...neighbors.map((n: any) => n.id),
+          ];
+          const indices = [index, ...neighbors.map((n: any) => n.index)];
+          const focus: SimilarityFocus = {
+            sourceIndex: index,
+            neighbors: neighbors.map((n: any) => ({
+              index: n.index,
+              rank: n.rank,
+            })),
+          };
+
+          applyStage(selectStage(ids), ids.length, ids, indices, focus);
+        },
+      }
+    );
+  }
+
   // Memoized so that the trace memo in Panel only invalidates when the
   // selection actually changes. Point styling is index-based; checked
   // samples (grid checkboxes, id-based) are resolved to indices by
@@ -286,6 +385,8 @@ export function usePlotSelection() {
     handleLasso,
     handleClassSelect,
     toggleSelected,
+    handleSimilaritySelect,
+    similarityFocus,
     selectionIndices,
   };
 }

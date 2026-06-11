@@ -9,7 +9,7 @@
  */
 
 import { OrbitView } from '@deck.gl/core';
-import { ScatterplotLayer } from '@deck.gl/layers';
+import { ArcLayer, LineLayer, ScatterplotLayer } from '@deck.gl/layers';
 import { PlotData, PlotColors } from './State';
 import { RGB, blendRgb, cssToRgb, viridisRgb, minMax } from './colors';
 import { DeckViewState } from './cameraStore';
@@ -30,7 +30,20 @@ const HALO_LIMIT = 50000;
 
 const UNIFORM_RGB: RGB = cssToRgb('#1f77b4');
 const SELECTED_RGB: RGB = [255, 152, 0];
+const SIM_SOURCE_RGB: RGB = [255, 152, 0];
+const SIM_NEIGHBOR_RGB: RGB = [255, 193, 7];
 const DIM_AMOUNT = 0.8;
+
+export interface SimilarNeighbor {
+  index: number;
+  // Position in the similarity ranking (0 = closest neighbor)
+  rank: number;
+}
+
+export interface SimilarityFocus {
+  sourceIndex: number;
+  neighborIndices: Set<number>;
+}
 
 interface ScatterSizing {
   radiusUnits: 'pixels' | 'common';
@@ -259,9 +272,9 @@ export function buildBaseColors(
  * Builds the per-point color + radius buffers for the current selection
  * state, plus the (optional, capped) halo buffers for selected points.
  *
- * Bright/dim priority mirrors the renderer's tiers: checked samples >
- * lasso selection > view-filter bitmask; class highlight applies only
- * when no selection tier is active.
+ * Bright/dim priority mirrors the renderer's tiers: similarity focus
+ * (explore click) > checked samples > lasso selection > view-filter
+ * bitmask; class highlight applies only when no higher tier is active.
  */
 export function buildSceneBuffers(opts: {
   positions: Float32Array;
@@ -271,6 +284,7 @@ export function buildSceneBuffers(opts: {
   checkedIndices: Set<number> | null;
   highlightSet: Set<number> | null;
   classMembers?: number[][];
+  similarityFocus?: SimilarityFocus | null;
 }): SceneBuffers {
   const {
     positions,
@@ -280,6 +294,7 @@ export function buildSceneBuffers(opts: {
     checkedIndices,
     highlightSet,
     classMembers,
+    similarityFocus,
   } = opts;
 
   const count = baseRGB.length / 3;
@@ -306,7 +321,22 @@ export function buildSceneBuffers(opts: {
     haloIndices.push(i);
   };
 
-  if (highlightSet && classMembers) {
+  if (similarityFocus) {
+    const { sourceIndex, neighborIndices } = similarityFocus;
+    for (let i = 0; i < count; i++) {
+      if (i === sourceIndex) {
+        setColor(i, SIM_SOURCE_RGB);
+        radii[i] = CHECKED_RADIUS;
+        haloIndices.push(i);
+      } else if (neighborIndices.has(i)) {
+        setColor(i, SIM_NEIGHBOR_RGB);
+        radii[i] = BASE_RADIUS * 1.15;
+        haloIndices.push(i);
+      } else {
+        dim(i);
+      }
+    }
+  } else if (highlightSet && classMembers) {
     for (let i = 0; i < count; i++) {
       if (classMembers[i].some((ci) => highlightSet.has(ci))) {
         bright(i);
@@ -363,6 +393,57 @@ function buildHalo(
     hr[j] = radii[i] * HALO_SCALE;
   }
   return { positions: hp, colors: hc, radii: hr };
+}
+
+function readPosition(
+  positions: Float32Array,
+  index: number
+): [number, number, number] {
+  const o = index * 3;
+  return [positions[o], positions[o + 1], positions[o + 2]];
+}
+
+/** Arcs (3D) or segments (2D) from a source point to its neighbors. */
+export function buildSimilarityLinkLayer(opts: {
+  sourceIndex: number;
+  neighbors: SimilarNeighbor[];
+  positions: Float32Array;
+  is2D: boolean;
+}): ArcLayer | LineLayer | null {
+  const { sourceIndex, neighbors, positions, is2D } = opts;
+  if (!neighbors.length) return null;
+
+  const source = readPosition(positions, sourceIndex);
+  const data = neighbors.map((n) => ({
+    source,
+    target: readPosition(positions, n.index),
+  }));
+
+  const common = {
+    id: 'similarity-links',
+    data,
+    pickable: false,
+    getWidth: 2,
+    widthUnits: 'pixels' as const,
+    parameters: { depthTest: !is2D, depthMask: false },
+  };
+
+  if (is2D) {
+    return new LineLayer({
+      ...common,
+      getSourcePosition: (d: (typeof data)[0]) => d.source,
+      getTargetPosition: (d: (typeof data)[0]) => d.target,
+      getColor: [...SIM_SOURCE_RGB, 180],
+    });
+  }
+
+  return new ArcLayer({
+    ...common,
+    getSourcePosition: (d: (typeof data)[0]) => d.source,
+    getTargetPosition: (d: (typeof data)[0]) => d.target,
+    getSourceColor: [...SIM_SOURCE_RGB, 200],
+    getTargetColor: [...SIM_NEIGHBOR_RGB, 160],
+  });
 }
 
 /**
