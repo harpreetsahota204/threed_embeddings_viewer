@@ -297,7 +297,9 @@ class GetSampleInfo(foo.Operator):
         sample_id = results.sample_ids[index]
         debug = None
         try:
-            filepath, debug = _resolve_media_url(ctx.dataset, sample_id)
+            filepath, debug = _resolve_media_url(
+                ctx.dataset, sample_id, ctx=ctx
+            )
         except KeyError:
             # Sample deleted since the brain run
             filepath = None
@@ -664,7 +666,23 @@ def _compute_colors(raw_values):
     }
 
 
-def _resolve_media_url(dataset, sample_id):
+def _get_operator_session(ctx):
+    """Return the App session Enterprise uses to sign cloud media URLs.
+
+    OSS ``ExecutionContext`` has no session; Enterprise injects one (either
+    as ``ctx.session`` or in ``request_params["session"]``).
+    """
+    if ctx is None:
+        return None
+
+    session = getattr(ctx, "session", None)
+    if session is not None:
+        return session
+
+    return ctx.request_params.get("session")
+
+
+def _resolve_media_url(dataset, sample_id, ctx=None):
     """Resolve a sample's filepath to a browser-loadable media URL.
 
     For cloud-backed datasets the raw filepath is a ``gs://``/``s3://``
@@ -678,6 +696,7 @@ def _resolve_media_url(dataset, sample_id):
     happened server-side, surfaced to the browser console for debugging
     (it never changes the resolved url).
     """
+    import inspect
     import traceback as _traceback
 
     debug = {
@@ -686,6 +705,8 @@ def _resolve_media_url(dataset, sample_id):
         "signed": False,
         "resolved_url": None,
         "error": None,
+        "session_available": False,
+        "session_source": None,
     }
 
     sample = dataset[sample_id]
@@ -698,9 +719,27 @@ def _resolve_media_url(dataset, sample_id):
 
         debug["signing_attempted"] = True
         media_type = fom.get_media_type(filepath)
-        _, _, media_urls = fosm._create_media_urls(
-            dataset, sample.to_mongo_dict(), media_type, cache={}
-        )
+        sample_dict = sample.to_mongo_dict()
+        cache = {}
+
+        session = _get_operator_session(ctx)
+        if session is not None:
+            debug["session_available"] = True
+            if getattr(ctx, "session", None) is not None:
+                debug["session_source"] = "ctx.session"
+            else:
+                debug["session_source"] = "request_params.session"
+
+        sig = inspect.signature(fosm._create_media_urls)
+        args = [dataset, sample_dict, media_type, cache]
+        if "session" in sig.parameters:
+            if session is None:
+                raise TypeError(
+                    "_create_media_urls() requires session for cloud signing"
+                )
+            args.append(session)
+
+        _, _, media_urls = fosm._create_media_urls(*args)
         debug["media_urls"] = media_urls
         for entry in media_urls:
             if entry.get("field") == "filepath" and entry.get("url"):
