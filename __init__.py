@@ -294,7 +294,7 @@ class GetSampleInfo(foo.Operator):
 
         sample_id = results.sample_ids[index]
         try:
-            filepath = ctx.dataset[sample_id].filepath
+            filepath = _resolve_media_url(ctx.dataset, sample_id)
         except KeyError:
             # Sample deleted since the brain run
             filepath = None
@@ -646,6 +646,36 @@ def _compute_colors(raw_values):
             for sample_labels in members
         ],
     }
+
+
+def _resolve_media_url(dataset, sample_id):
+    """Resolve a sample's filepath to a browser-loadable media URL.
+
+    For cloud-backed datasets the raw filepath is a ``gs://``/``s3://``
+    URI that the browser cannot load. Enterprise resolves these to signed
+    HTTPS URLs via the same server code path the grid uses
+    (``_create_media_urls``); on open source the raw local/path is
+    returned and the App serves it through the ``/media`` proxy. Falls
+    back to the raw filepath if resolution is unavailable.
+    """
+    sample = dataset[sample_id]
+    filepath = sample.filepath
+
+    try:
+        import fiftyone.core.media as fom
+        import fiftyone.server.metadata as fosm
+
+        media_type = fom.get_media_type(filepath)
+        _, _, media_urls = fosm._create_media_urls(
+            dataset, sample.to_mongo_dict(), media_type, cache={}
+        )
+        for entry in media_urls:
+            if entry.get("field") == "filepath" and entry.get("url"):
+                return entry["url"]
+    except Exception:
+        pass
+
+    return filepath
 
 
 def _summarize(value):
