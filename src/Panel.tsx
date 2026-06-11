@@ -45,6 +45,7 @@ import {
 import { base64ToBytes } from './base64';
 import { testBit } from './bitmask';
 import { dimToward, minMax, numericToColors } from './colors';
+import { getHoverSampleSrc } from './sampleSrc';
 import { lassoSelectionAtom, PlotCategory } from './State';
 import {
   getDefaultAspectratio,
@@ -826,7 +827,7 @@ const ThreeDEmbeddingsPanel = () => {
   ]);
 
   const hoverSrc = hoverInfo?.filepath
-    ? (fos.getSampleSrc(hoverInfo.filepath) as string)
+    ? getHoverSampleSrc(hoverInfo.filepath)
     : null;
 
   // Min/max labels for the continuous colorscale legend

@@ -5,4 +5,5 @@ declare module '@fiftyone/operators';
 declare module '@fiftyone/plugins';
 declare module '@fiftyone/components';
 declare module '@fiftyone/spaces';
+declare module '@fiftyone/utilities';
 declare module 'react-plotly.js';
