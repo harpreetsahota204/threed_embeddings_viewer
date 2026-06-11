@@ -295,11 +295,8 @@ class GetSampleInfo(foo.Operator):
             return empty
 
         sample_id = results.sample_ids[index]
-        debug = None
         try:
-            filepath, debug = _resolve_media_url(
-                ctx.dataset, sample_id, ctx=ctx
-            )
+            filepath, debug = _resolve_media_url(ctx.dataset, sample_id)
         except KeyError:
             # Sample deleted since the brain run
             filepath = None
@@ -619,8 +616,7 @@ def _compute_colors(raw_values):
         categorical: {count, categories, class_indices_b64, class_members,
                       color_scheme}
     """
-    summaries = [_summarize(v) for v in raw_values]
-    class_values = [s[0] for s in summaries]
+    class_values = [_summarize(v)[0] for v in raw_values]
     count = len(raw_values)
 
     is_numeric = any(_is_number(v) for v in class_values) and all(
@@ -666,93 +662,57 @@ def _compute_colors(raw_values):
     }
 
 
-def _get_operator_session(ctx):
-    """Return the App session Enterprise uses to sign cloud media URLs.
-
-    OSS ``ExecutionContext`` has no session; Enterprise injects one (either
-    as ``ctx.session`` or in ``request_params["session"]``).
-    """
-    if ctx is None:
-        return None
-
-    session = getattr(ctx, "session", None)
-    if session is not None:
-        return session
-
-    return ctx.request_params.get("session")
-
-
-def _resolve_media_url(dataset, sample_id, ctx=None):
+def _resolve_media_url(dataset, sample_id):
     """Resolve a sample's filepath to a browser-loadable media URL.
 
-    For cloud-backed datasets the raw filepath is a ``gs://``/``s3://``
-    URI that the browser cannot load. Enterprise resolves these to signed
-    HTTPS URLs via the same server code path the grid uses
-    (``_create_media_urls``); on open source the raw local/path is
-    returned and the App serves it through the ``/media`` proxy. Falls
-    back to the raw filepath if resolution is unavailable.
+    For cloud-backed datasets (Enterprise) the raw filepath is a
+    ``gs://``/``s3://``/``az://`` URI that an ``<img>`` tag cannot load.
+    The Enterprise SDK signs such paths via
+    ``fiftyone.core.cache.media_cache.get_url()`` — the exact code path
+    behind the App server's ``/signed-url`` route — using the
+    deployment's managed cloud credentials. No App session is involved.
 
-    Returns ``(url, debug)``. ``debug`` is a small dict describing what
-    happened server-side, surfaced to the browser console for debugging
-    (it never changes the resolved url).
+    On open source, ``fiftyone.core.cache`` does not exist and
+    ``FileSystem`` only has ``LOCAL``, so the raw filepath is returned
+    and the App serves it through its ``/media`` proxy.
+
+    Returns ``(url, debug)``. ``debug`` is a small dict surfaced to the
+    browser console for debugging; it never changes the resolved url.
     """
-    import inspect
-    import traceback as _traceback
-
+    filepath = dataset[sample_id].filepath
     debug = {
-        "raw_filepath": None,
-        "signing_attempted": False,
+        "raw_filepath": filepath,
         "signed": False,
-        "resolved_url": None,
         "error": None,
-        "session_available": False,
-        "session_source": None,
     }
 
-    sample = dataset[sample_id]
-    filepath = sample.filepath
-    debug["raw_filepath"] = filepath
-
     try:
-        import fiftyone.core.media as fom
-        import fiftyone.server.metadata as fosm
+        # Enterprise SDK only; ImportError on open source
+        import fiftyone.core.cache as focc
+        import fiftyone.core.storage as fost
 
-        debug["signing_attempted"] = True
-        media_type = fom.get_media_type(filepath)
-        sample_dict = sample.to_mongo_dict()
-        cache = {}
+        # Local paths are served by the App's /media proxy and plain
+        # HTTP(S) URLs already load directly (same skip-list as the
+        # Enterprise /signed-url route)
+        fs = fost.get_file_system(filepath)
+        if fs in (
+            fost.FileSystem.LOCAL,
+            getattr(fost.FileSystem, "HTTP", None),
+        ):
+            return filepath, debug
 
-        session = _get_operator_session(ctx)
-        if session is not None:
-            debug["session_available"] = True
-            if getattr(ctx, "session", None) is not None:
-                debug["session_source"] = "ctx.session"
-            else:
-                debug["session_source"] = "request_params.session"
+        if focc.media_cache is None:
+            raise RuntimeError("media cache is not initialized")
 
-        sig = inspect.signature(fosm._create_media_urls)
-        args = [dataset, sample_dict, media_type, cache]
-        if "session" in sig.parameters:
-            if session is None:
-                raise TypeError(
-                    "_create_media_urls() requires session for cloud signing"
-                )
-            args.append(session)
-
-        _, _, media_urls = fosm._create_media_urls(*args)
-        debug["media_urls"] = media_urls
-        for entry in media_urls:
-            if entry.get("field") == "filepath" and entry.get("url"):
-                debug["signed"] = True
-                debug["resolved_url"] = entry["url"]
-                return entry["url"], debug
+        url = focc.media_cache.get_url(filepath, method="GET")
+        debug["signed"] = True
+        return url, debug
+    except ImportError:
+        # Open source: nothing to sign
+        pass
     except Exception as e:
-        debug["error"] = (
-            "".join(_traceback.format_exception_only(type(e), e)).strip()
-        )
-        debug["traceback"] = _traceback.format_exc()
+        debug["error"] = f"{type(e).__name__}: {e}"
 
-    debug["resolved_url"] = filepath
     return filepath, debug
 
 
