@@ -285,12 +285,14 @@ class GetSampleInfo(foo.Operator):
         brain_key = ctx.params.get("brain_key")
         index = ctx.params.get("index")
         color_by = ctx.params.get("color_by")
+        empty = {"sample_id": None, "filepath": None, "hover_lines": None}
+
         if brain_key is None or index is None:
-            return {"sample_id": None, "filepath": None, "hover_lines": None}
+            return empty
 
         results = _load_brain_results(ctx.dataset, brain_key)
         if not 0 <= index < len(results.sample_ids):
-            return {"sample_id": None, "filepath": None, "hover_lines": None}
+            return empty
 
         sample_id = results.sample_ids[index]
         try:
@@ -354,7 +356,7 @@ class ApplySelection(foo.Operator):
     MatchTags stage instead.
 
     Kinds:
-        lasso:  {brain_key, lasso: {polygon, camera, data_scale, rect}}
+        lasso:  {brain_key, lasso: {polygon, matrix, rect}}
         class:  {brain_key, color_by, label} (presence semantics)
         toggle: {brain_key, index, current_ids} — current_ids is the
                 small-tier id list (or [] for no selection); null means
@@ -425,8 +427,8 @@ class ApplySelection(foo.Operator):
 
 def _projection_matrix(values):
     """Builds a numpy matrix from a column-major 4x4 matrix (gl-matrix
-    layout, as exposed by ``scene.glplot.cameraParams``) such that
-    ``matrix @ vec`` matches plotly's gl3d projection math."""
+    layout, as exposed by deck.gl's ``viewport.viewProjectionMatrix``)
+    such that ``matrix @ vec`` matches deck's projection math."""
     return np.asarray(values, dtype=float).reshape(4, 4).T
 
 
@@ -434,10 +436,11 @@ def _resolve_lasso(results, lasso):
     """Returns the point indices whose projected screen positions fall
     inside the lasso polygon.
 
-    Same math as the frontend's lasso.ts (plotly gl3d/project.js), but
-    vectorized over all points: data coords are scaled by the scene's
-    dataScale, projected through projection @ view @ model, perspective-
-    divided, and mapped into the scene container's client rect.
+    Same math as deck.gl's ``viewport.project``, vectorized over all
+    points: data coords are projected through the scene's
+    view-projection matrix, perspective-divided into NDC, and mapped into
+    the canvas client rect. deck uses raw data coordinates (no separate
+    data scale), so a single matrix fully describes the transform.
     """
     points = np.asarray(results.points, dtype=float)
     n = len(points)
@@ -449,17 +452,10 @@ def _resolve_lasso(results, lasso):
     if points.shape[1] >= 3:
         xyz[:, 2] = points[:, 2]
 
-    camera = lasso["camera"]
     rect = lasso["rect"]
-    scale = np.asarray(lasso["data_scale"], dtype=float)
+    matrix = _projection_matrix(lasso["matrix"])
 
-    matrix = (
-        _projection_matrix(camera["projection"])
-        @ _projection_matrix(camera["view"])
-        @ _projection_matrix(camera["model"])
-    )
-
-    homo = np.column_stack([xyz * scale, np.ones(n)])
+    homo = np.column_stack([xyz, np.ones(n)])
     projected = homo @ matrix.T
     w = projected[:, 3]
 
@@ -470,7 +466,7 @@ def _resolve_lasso(results, lasso):
     inside = _points_in_polygon(sx, sy, lasso["polygon"])
     inside &= w > 0  # Behind the camera
 
-    return [int(i) for i in np.flatnonzero(inside)]
+    return np.flatnonzero(inside).astype(int).tolist()
 
 
 def _points_in_polygon(x, y, polygon):

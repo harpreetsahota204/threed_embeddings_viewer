@@ -1,11 +1,13 @@
 /**
  * Embeddings Panel
  *
- * Renders brain visualization results of any dimensionality >= 2 in a
- * plotly scatter3d scene (2D embeddings as a flat plane viewed top-down)
- * with click + custom lasso selection (scatter3d has no native selection
- * support). Styled to match the built-in 2D Embeddings panel: floating
- * controls over a clean, axis-less plot.
+ * Renders brain visualization results of any dimensionality >= 2 with a
+ * deck.gl ScatterplotLayer in an OrbitView (2D embeddings as a flat plane
+ * viewed straight-on, orthographic). deck.gl keeps millions of points on
+ * the GPU as binary attribute buffers, does hover/click picking on the
+ * GPU. 3D scroll zoom uses a cursor-dolly controller; 2D uses orthographic
+ * pan/zoom. Styled to match the built-in 2D Embeddings panel: floating
+ * controls over a clean, axis-less scene.
  */
 
 import React, {
@@ -21,7 +23,7 @@ import { useOperatorExecutor } from '@fiftyone/operators';
 import { usePanelStatePartial } from '@fiftyone/spaces';
 import * as fos from '@fiftyone/state';
 import { useRecoilValue } from 'recoil';
-import Plot from 'react-plotly.js';
+import { DeckGL } from '@deck.gl/react';
 import { useBrainResultsSelector } from './useBrainResult';
 import { useLabelSelector } from './useLabelSelector';
 import {
@@ -36,37 +38,30 @@ import TabIndicator from './TabIndicator';
 import EmbeddingsPanelIcon from './Icon';
 import HoverCard from './HoverCard';
 import { CategoricalLegend, ColorLegend, FloatingPanel } from './Legend';
-import {
-  getProjectionParams,
-  pickNearestPoint,
-  projectPointToClient,
-  Point2D,
-} from './lasso';
+import { getDeckProjection, Point2D } from './lasso';
+import { clearDollyAnchor, setDollyAnchor } from './dollyAnchor';
+import { CursorDollyOrbitController } from './cursorDollyController';
 import { base64ToBytes } from './base64';
 import { testBit } from './bitmask';
-import { dimToward, minMax, numericToColors } from './colors';
+import { cssToRgb, minMax } from './colors';
 import { lassoSelectionAtom, PlotCategory } from './State';
 import {
-  getDefaultAspectratio,
-  getSavedAspectratio,
-  getSavedCamera,
-  recordDefaultAspectratio,
-  setSavedAspectratio,
-  setSavedCamera,
-  resetSavedCamera,
+  getSavedViewState,
+  setSavedViewState,
+  DeckViewState,
 } from './cameraStore';
-import { Aspectratio, useCursorZoom } from './useCursorZoom';
+import {
+  buildBaseColors,
+  buildPositions,
+  buildOrbitView,
+  buildScatterLayers,
+  buildSceneBuffers,
+  computeBounds,
+  initialViewState,
+  pointAt,
+} from './deckScene';
+import { HOVER_PICK_INTERVAL_MS, pickPointIndex } from './plotPick';
 import './Operator';
-
-const SELECTED_COLOR = '#ff9800';
-const UNIFORM_COLOR = '#1f77b4';
-const DEFAULT_CAMERA = { eye: { x: 1.5, y: 1.5, z: 1.5 } };
-// 2D embeddings: top-down orthographic view renders like a true 2D plot
-const DEFAULT_CAMERA_2D = {
-  eye: { x: 0, y: 0, z: 2 },
-  up: { x: 0, y: 1, z: 0 },
-  projection: { type: 'orthographic' },
-};
 
 // Sample id, filepath, and hover lines are looked up per hover by point
 // index (not shipped with plot/colors data); cached per
@@ -77,20 +72,6 @@ interface SampleInfo {
   hoverLines: string[] | null;
 }
 const sampleInfoCache = new Map<string, SampleInfo>();
-
-// plotly hardcodes the gl3d camera distance limits to [0.01, 100]
-// (gl3d/scene.js) — only ~250x zoom-in from the default camera. These
-// extend the range to "effectively infinite": the floor is set by
-// float32 GPU coordinates, which start to jitter below ~1e-4 of the
-// scene size anyway.
-const ZOOM_DISTANCE_LIMITS = [1e-5, 1000];
-
-const HIDDEN_AXIS = {
-  visible: false,
-  showgrid: false,
-  zeroline: false,
-  showbackground: false,
-};
 
 const Value = React.memo<{ value: string }>(({ value }) => <>{value}</>);
 
@@ -114,7 +95,8 @@ const centerMessage = (children: React.ReactNode, color: string) => (
 
 const ThreeDEmbeddingsPanel = () => {
   const theme = useTheme();
-  const plotRef = useRef<any>(null);
+  const deckRef = useRef<any>(null);
+  const plotAreaRef = useRef<HTMLDivElement>(null);
   const brainResultSelector = useBrainResultsSelector();
   const labelSelector = useLabelSelector();
   const plotSelection = usePlotSelection();
@@ -122,6 +104,7 @@ const ThreeDEmbeddingsPanel = () => {
   const datasetName = useRecoilValue(fos.datasetName) as string;
   const lassoSelection = useRecoilValue(lassoSelectionAtom);
   const clearSelection = useClearLassoSelection();
+  const brainKey = brainResultSelector.brainKey;
   // Grid-checked samples resolved to point indices (ids never live here)
   const checkedIndices = useCheckedIndices(plotData);
 
@@ -135,10 +118,13 @@ const ThreeDEmbeddingsPanel = () => {
     false,
     true
   );
-  // Bumping this value resets the camera to the layout default (uirevision).
-  // Must be truthy: plotly treats a falsy uirevision as "no revision" and
-  // resets the camera on every data update.
-  const [cameraRev, setCameraRev] = useState(1);
+
+  // The select-mode overlay suppresses hover, so the dolly anchor can't be
+  // refreshed there — drop it on mode change to avoid dollying toward a stale
+  // point.
+  useEffect(() => {
+    clearDollyAnchor();
+  }, [selectMode]);
 
   const selectorStyle = useMemo(
     () => ({
@@ -233,7 +219,7 @@ const ThreeDEmbeddingsPanel = () => {
     if (pruned.length !== highlightedClasses.length) {
       setHighlightedClasses(pruned);
     }
-  }, [activeColors, highlightedClasses]);
+  }, [activeColors, highlightedClasses, setHighlightedClasses]);
 
   const toggleHighlightedClass = useCallback(
     (label: string) => {
@@ -246,373 +232,159 @@ const ThreeDEmbeddingsPanel = () => {
     [setHighlightedClasses]
   );
 
-  // Base (unselected, undimmed) per-point colors. Memoized separately
-  // from plotTraces so that selections/dimming changes don't recompute
-  // the colorscale mapping over every point.
-  const baseColors = useMemo(() => {
-    if (!plotData) return null;
-    if (!activeColors) {
-      return new Array(plotData.count).fill(UNIFORM_COLOR) as string[];
-    }
-    if (activeColors.color_scheme === 'continuous') {
-      return numericToColors(activeColors.colors!);
-    }
-    const categories = activeColors.categories!;
-    const indices = activeColors.class_indices!;
-    const out = new Array<string>(plotData.count);
-    for (let i = 0; i < plotData.count; i++) {
-      out[i] = categories[indices[i]].color;
-    }
-    return out;
-  }, [plotData, activeColors]);
-
-  const plotTraces = useMemo(() => {
-    if (!plotData || !baseColors) return [];
-
-    // scatter3d does not support selectedpoints/selected/unselected, so
-    // dimming is done with explicit per-point colors and sizes.
-    //
-    // IMPORTANT: the marker config must keep the same shape (color-string
-    // array + size array) whether or not a selection exists. Switching
-    // between numeric colorscale mode and color-array mode makes
-    // gl-scatter3d re-render every point with subtly different
-    // sizing/shading, which is visually jarring. Selection therefore only
-    // changes the *values* of dimmed points: selected points keep their
-    // exact base color, unselected points blend toward the background
-    // (solid colors, since translucent scatter3d markers render with
-    // blending artifacts).
-    //
-    // All tiers are index-based (no ids client-side). Bright/dim
-    // priority: checked samples > lasso selection > view-filter bitmask;
-    // class highlight applies only when none of those are active.
-    const selectionIndices = plotSelection.selectionIndices;
-    const inSelection: ((i: number) => boolean) | null = checkedIndices
-      ? (i) => checkedIndices.has(i)
-      : selectionIndices
-      ? (i) => selectionIndices.has(i)
-      : viewBitmask
-      ? (i) => testBit(viewBitmask, i)
-      : null;
-
-    // Class highlight (legend clicks): applies only when no sample
-    // selection/filter is active — any selection tier beats it. Presence
-    // semantics: a point is highlighted if it CONTAINS a highlighted class
-    const highlightedIndexSet =
-      !inSelection &&
-      activeColors?.class_members &&
-      highlightedClasses?.length
-        ? new Set(
-            activeColors
-              .categories!.map((c, i) =>
-                highlightedClasses.includes(c.label) ? i : -1
-              )
-              .filter((i) => i >= 0)
-          )
-        : null;
-
-    // NB: scatter3d halves array sizes relative to scalar sizes (array
-    // values go through bubble-chart diameter scaling in
-    // scatter3d/convert.js), so these are 2x the intended scalar size
-    const BASE_SIZE = 8;
-    const DIMMED_SIZE = 6;
-    const CHECKED_SIZE = 12;
-    const HALO_SCALE = 2.4;
-
-    let colors: string[];
-    let sizes: number[];
-
-    // Soft "glow" behind selected points: a second trace at the same
-    // coordinates with larger, translucent markers, drawn under the
-    // main trace. Always present (possibly empty) so the trace count
-    // never changes across selections.
-    const halo = {
-      x: [] as number[],
-      y: [] as number[],
-      z: [] as number[],
-      colors: [] as string[],
-      sizes: [] as number[],
-    };
-    const addHalo = (i: number, color: string, size: number) => {
-      halo.x.push(plotData.x[i]);
-      halo.y.push(plotData.y[i]);
-      halo.z.push(plotData.z[i]);
-      halo.colors.push(color);
-      halo.sizes.push(size * HALO_SCALE);
-    };
-
-    // The visible plot background is the spaces panel background
-    const background = theme.background.mediaSpace || theme.background.level2;
-
-    if (highlightedIndexSet) {
-      colors = [];
-      sizes = [];
-      activeColors!.class_members!.forEach((memberIndices, i) => {
-        if (memberIndices.some((ci) => highlightedIndexSet.has(ci))) {
-          colors.push(baseColors[i]);
-          sizes.push(BASE_SIZE);
-          addHalo(i, baseColors[i], BASE_SIZE);
-        } else {
-          colors.push(dimToward(baseColors[i], background, 0.8));
-          sizes.push(DIMMED_SIZE);
-        }
-      });
-    } else if (!inSelection) {
-      colors = baseColors;
-      sizes = new Array(plotData.count).fill(BASE_SIZE);
-    } else {
-      colors = [];
-      sizes = [];
-      for (let i = 0; i < plotData.count; i++) {
-        if (checkedIndices?.has(i)) {
-          colors.push(SELECTED_COLOR);
-          sizes.push(CHECKED_SIZE);
-          addHalo(i, SELECTED_COLOR, CHECKED_SIZE);
-        } else if (inSelection(i)) {
-          colors.push(baseColors[i]);
-          sizes.push(BASE_SIZE);
-          addHalo(i, baseColors[i], BASE_SIZE);
-        } else {
-          colors.push(dimToward(baseColors[i], background, 0.8));
-          sizes.push(DIMMED_SIZE);
-        }
-      }
-    }
-
-    // Array marker sizes make plotly treat the trace as a bubble chart,
-    // whose marker.line defaults to width 1 in WHITE (Color.background);
-    // disable the outline explicitly. Hover is skipped because it is
-    // rendered by our own card via pointer-move picking.
-    const markerTrace = (
-      x: ArrayLike<number>,
-      y: ArrayLike<number>,
-      z: ArrayLike<number>,
-      color: string[],
-      size: number[],
-      opacity: number
-    ) => ({
-      type: 'scatter3d',
-      mode: 'markers',
-      x,
-      y,
-      z,
-      marker: { color, size, opacity, line: { width: 0 } },
-      hoverinfo: 'skip',
-      showlegend: false,
-    });
-
-    // Halo first so it renders beneath the main trace
-    return [
-      markerTrace(halo.x, halo.y, halo.z, halo.colors, halo.sizes, 0.25),
-      markerTrace(plotData.x, plotData.y, plotData.z, colors, sizes, 0.85),
-    ];
-  }, [
-    plotData,
-    baseColors,
-    activeColors,
-    viewBitmask,
-    highlightedClasses,
-    plotSelection.selectionIndices,
-    checkedIndices,
-    theme.background.mediaSpace,
-    theme.background.level2,
-  ]);
-
   const is2D = plotData?.num_dims === 2;
 
-  const plotLayout = useMemo(() => {
-    const savedAspect = getSavedAspectratio();
-    return {
-      autosize: true,
-      uirevision: cameraRev,
-      margin: { l: 0, r: 0, t: 0, b: 0 },
-      font: { family: 'var(--fo-fontFamily-body)', size: 14 },
-      scene: {
-        dragmode: 'orbit',
-        xaxis: HIDDEN_AXIS,
-        yaxis: HIDDEN_AXIS,
-        zaxis: HIDDEN_AXIS,
-        camera:
-          getSavedCamera() || (is2D ? DEFAULT_CAMERA_2D : DEFAULT_CAMERA),
-        bgcolor: 'rgba(0,0,0,0)',
-        // Ortho (2D) zoom lives in the aspectratio; restore it across
-        // rebuilds/remounts just like the camera
-        ...(savedAspect
-          ? { aspectmode: 'manual', aspectratio: savedAspect }
-          : {}),
-      } as any,
-      hovermode: false,
-      paper_bgcolor: 'rgba(0,0,0,0)',
-      plot_bgcolor: 'rgba(0,0,0,0)',
-    };
-  }, [cameraRev, is2D]);
-
-  const getScene = useCallback(
-    () => plotRef.current?.el?._fullLayout?.scene?._scene,
-    []
+  // The visible scene background is the spaces panel background; dimmed
+  // points blend toward it
+  const backgroundRGB = useMemo(
+    () => cssToRgb(theme.background.mediaSpace || theme.background.level2),
+    [theme.background.mediaSpace, theme.background.level2]
   );
 
-  // Plotly only writes the live camera back into the layout on a clean
-  // canvas mouseup/wheel, so a zoom/rotate that ends off-canvas would be
-  // lost on the next trace rebuild (the view "resets"). Snapshot the live
-  // camera from the scene right before any selection-triggered rebuild,
-  // and keep the module copy (for remounts), plotly's layout object (for
-  // in-place rebuilds), AND plotly's fullLayout record in sync — the
-  // last one is what plotly diffs against when deciding whether a layout
-  // camera change needs applying, and programmatic camera moves (cursor
-  // zoom) never update it on their own.
-  const captureCamera = useCallback(() => {
-    const camera = getScene()?.getCamera?.();
-    if (camera) {
-      setSavedCamera(camera);
-      plotLayout.scene.camera = camera;
-      const fullLayout = plotRef.current?.el?._fullLayout;
-      if (fullLayout?.scene) {
-        fullLayout.scene.camera = camera;
-      }
-    }
-  }, [plotLayout, getScene]);
-
-  // "Infinizoom": widen plotly's hardcoded camera distance limits, and
-  // keep the near/far clip planes tracking the zoom level — zNear must
-  // shrink as the camera closes in (or nearby points clip away right
-  // when you zoom toward them), but a permanently tiny zNear destroys
-  // depth-buffer precision at normal zoom, so it scales with distance.
-  const applyZoomLimits = useCallback(() => {
-    const scene = getScene();
-    const view = scene?.camera?.view;
-    if (view?.setDistanceLimits) {
-      view.setDistanceLimits(
-        ZOOM_DISTANCE_LIMITS[0],
-        ZOOM_DISTANCE_LIMITS[1]
-      );
-    }
-
-    const glplot = scene?.glplot;
-    const camera = scene?.getCamera?.();
-    if (glplot && camera) {
-      const distance = Math.hypot(
-        camera.eye.x - camera.center.x,
-        camera.eye.y - camera.center.y,
-        camera.eye.z - camera.center.z
-      );
-      glplot.zNear = Math.min(0.01, Math.max(distance * 0.01, 1e-7));
-      glplot.zFar = Math.max(1000, distance * 4);
-    }
-  }, [getScene]);
-
-  // The scene is recreated on every panel remount/brain-key switch;
-  // re-apply the limits once it exists, and snapshot the pristine
-  // aspectratio (Reset View restores it after ortho zooming — but only
-  // when the scene was created WITHOUT a restored zoom)
-  useEffect(() => {
-    if (!plotData) return;
-    let cancelled = false;
-    const tryApply = () => {
-      if (cancelled) return;
-      const scene = getScene();
-      if (scene?.camera) {
-        applyZoomLimits();
-        const aspect = scene.glplot?.getAspectratio?.();
-        if (aspect && !getSavedAspectratio()) {
-          recordDefaultAspectratio(aspect);
-        }
-      } else {
-        requestAnimationFrame(tryApply);
-      }
-    };
-    tryApply();
-    return () => {
-      cancelled = true;
-    };
-  }, [plotData, applyZoomLimits, getScene]);
-
-  const handleRelayout = useCallback(
-    (event: any) => {
-      const camera = event?.['scene.camera'];
-      if (camera) {
-        setSavedCamera(camera);
-        plotLayout.scene.camera = camera;
-      }
-
-      // plotly's relayout tracking records scene.aspectratio as a "GUI
-      // edit" once our ortho cursor-zoom has changed it, but the
-      // uirevision code doesn't recognize aspectratio keys and logs
-      // "unrecognized GUI edit: scene.aspectratio.x" on every rebuild.
-      // We persist the aspectratio through the layout ourselves, so the
-      // tracking entries are redundant — drop them.
-      const preGUI = plotRef.current?.el?._fullLayout?._preGUI;
-      if (preGUI) {
-        for (const key of Object.keys(preGUI)) {
-          if (key.startsWith('scene.aspectratio')) {
-            delete preGUI[key];
-          }
-        }
-      }
-
-      // Fires on every wheel tick / drag end — keeps clip planes in
-      // sync with the zoom level
-      applyZoomLimits();
-    },
-    [plotLayout, applyZoomLimits]
+  // GPU attribute buffers. Positions are built once per geometry load and
+  // the reference is kept stable so deck only re-uploads colors/radii when
+  // a selection changes (geometry is the dominant buffer).
+  const positions = useMemo(
+    () => (plotData ? buildPositions(plotData) : null),
+    [plotData]
   );
 
-  // After every cursor-zoom step: persist the camera (the zoom is
-  // applied programmatically, so plotly emits no relayout) and keep the
-  // clip planes tracking the new distance
-  const handleCursorZoomed = useCallback(
-    (aspect: Aspectratio | null) => {
-      captureCamera();
-      if (aspect) {
-        setSavedAspectratio(aspect);
-        plotLayout.scene.aspectmode = 'manual';
-        plotLayout.scene.aspectratio = aspect;
-      }
-      applyZoomLimits();
-    },
-    [captureCamera, plotLayout, applyZoomLimits]
+  const bounds = useMemo(
+    () => (plotData ? computeBounds(plotData) : null),
+    [plotData]
   );
 
-  const plotAreaRef = useRef<HTMLDivElement>(null);
-  useCursorZoom(
-    plotAreaRef,
-    plotRef,
+  // Base (unselected, undimmed) per-point RGB. Memoized separately from
+  // the selection buffers so dimming changes don't recompute the colormap.
+  const baseRGB = useMemo(
+    () => (plotData ? buildBaseColors(plotData, activeColors) : null),
+    [plotData, activeColors]
+  );
+
+  const selectionIndices = plotSelection.selectionIndices;
+
+  const inSelection = useMemo((): ((i: number) => boolean) | null => {
+    if (checkedIndices) return (i) => checkedIndices.has(i);
+    if (selectionIndices) return (i) => selectionIndices.has(i);
+    if (viewBitmask) return (i) => testBit(viewBitmask, i);
+    return null;
+  }, [checkedIndices, selectionIndices, viewBitmask]);
+
+  const highlightSet = useMemo(() => {
+    if (inSelection || !activeColors?.class_members || !highlightedClasses?.length) {
+      return null;
+    }
+    const labels = new Set(highlightedClasses);
+    return new Set(
+      activeColors.categories!
+        .map((c, i) => (labels.has(c.label) ? i : -1))
+        .filter((i) => i >= 0)
+    );
+  }, [inSelection, activeColors, highlightedClasses]);
+
+  const sceneBuffers = useMemo(() => {
+    if (!plotData || !positions || !baseRGB) return null;
+    return buildSceneBuffers({
+      positions,
+      baseRGB,
+      background: backgroundRGB,
+      inSelection,
+      checkedIndices,
+      highlightSet,
+      classMembers: activeColors?.class_members,
+    });
+  }, [
     plotData,
-    ZOOM_DISTANCE_LIMITS,
-    handleCursorZoomed
+    positions,
+    baseRGB,
+    activeColors,
+    inSelection,
+    highlightSet,
+    checkedIndices,
+    backgroundRGB,
+  ]);
+
+  const layers = useMemo(() => {
+    if (!plotData || !positions || !sceneBuffers || !bounds) return [];
+    return buildScatterLayers({
+      count: plotData.count,
+      positions,
+      sceneBuffers,
+      is2D: !!is2D,
+      maxExtent: bounds.maxExtent,
+    });
+  }, [plotData, positions, sceneBuffers, is2D, bounds]);
+
+  // 2D: left-drag pans, no rotation (OrbitController defaults dragMode to
+  // 'rotate', which makes left-drag rotate and leaves nothing for pan once
+  // dragRotate is off — so 2D needs dragMode: 'pan'). Both: double-click
+  // enters select mode rather than zooming; cursor-anchored scroll-zoom
+  // stays on.
+  const controller = useMemo(
+    () =>
+      is2D
+        ? { dragMode: 'pan' as const, dragRotate: false, doubleClickZoom: false }
+        : // 3D: dolly toward the cursor's point on scroll-in (fly into the
+          // cloud), rather than deck's scale-around-the-target-plane zoom
+          { type: CursorDollyOrbitController, doubleClickZoom: false },
+    [is2D]
   );
 
-  // Reset View applies the default camera IMPERATIVELY (scene.camera
-  // .lookAt) rather than relying on the uirevision bump alone: plotly
-  // only applies a layout camera when it differs from its own fullLayout
-  // record, and programmatic camera moves (cursor zoom) never enter that
-  // record — so after wheel zooming, a layout-driven reset is a no-op
-  // ("reset view sometimes does nothing").
+  // OrbitView view state, persisted across remounts (applying a selection
+  // reloads the page query and remounts the panel). null until the first
+  // fit so deck never renders with an undefined camera.
+  const [viewState, setViewState] = useState<DeckViewState | null>(null);
+  // Tracks whether the user has moved the camera; while false we (re)fit
+  // to the data as geometry streams in. Reset on geometry source change.
+  const userMovedRef = useRef(false);
+
+  useEffect(() => {
+    userMovedRef.current = false;
+  }, [datasetName, brainKey]);
+
+  // Adopt a camera saved before a remount (treated as user-moved so we
+  // don't refit over it)
+  useEffect(() => {
+    const saved = getSavedViewState();
+    if (saved) {
+      userMovedRef.current = true;
+      setViewState(saved);
+    }
+  }, []);
+
+  const fitView = useCallback(() => {
+    if (!bounds) return;
+    const area = plotAreaRef.current;
+    const px = area
+      ? Math.min(area.clientWidth || 0, area.clientHeight || 0)
+      : 0;
+    const vs = initialViewState(bounds, !!is2D, px || 700);
+    setSavedViewState(vs);
+    setViewState(vs);
+  }, [bounds, is2D]);
+
+  // Initial fit, and refit as geometry streams in, until the user moves
+  useEffect(() => {
+    if (!plotData || userMovedRef.current) return;
+    fitView();
+  }, [plotData, fitView]);
+
+  const onViewStateChange = useCallback((params: any) => {
+    userMovedRef.current = true;
+    setSavedViewState(params.viewState);
+    setViewState(params.viewState);
+  }, []);
+
   const handleResetView = useCallback(() => {
-    resetSavedCamera();
+    if (!plotData) return;
+    userMovedRef.current = false;
+    fitView();
+  }, [plotData, fitView]);
 
-    const scene = getScene();
-    if (scene?.camera) {
-      const eye = is2D ? DEFAULT_CAMERA_2D.eye : DEFAULT_CAMERA.eye;
-      const up = is2D ? [0, 1, 0] : [0, 0, 1];
-      scene.camera.lookAt([eye.x, eye.y, eye.z], [0, 0, 0], up);
-    }
-
-    // Ortho (2D) zoom lives in the aspectratio; restore the pristine one
-    const defaultAspect = getDefaultAspectratio();
-    if (scene?.glplot && defaultAspect) {
-      scene.glplot.setAspectratio(defaultAspect);
-    }
-
-    applyZoomLimits();
-    setCameraRev((rev) => rev + 1);
-  }, [is2D, getScene, applyZoomLimits]);
-
-  // Hover card for the pointed-at sample, positioned next to the
-  // projected point in viewport coordinates. Hover is implemented with
-  // our own nearest-point picking on pointer move (NOT plotly's hover
-  // events, which come from the gl3d render loop, miss unhovers, and
-  // don't fire at all under the select-mode overlay) — so it works
-  // identically in both modes.
+  // Hover card for the pointed-at sample, positioned next to the projected
+  // point. Implemented with our own pointer-move GPU picking (deck.pickObject)
+  // rather than deck's onHover, so it works identically under the
+  // select-mode overlay and in explore mode.
   const [hoverPreview, setHoverPreview] = useState<{
     index: number;
     x: number;
@@ -622,6 +394,7 @@ const ThreeDEmbeddingsPanel = () => {
   const lastHoverPickRef = useRef(0);
 
   const clearHover = useCallback(() => {
+    clearDollyAnchor();
     if (hoverPreviewRef.current !== null) {
       hoverPreviewRef.current = null;
       setHoverPreview(null);
@@ -630,43 +403,41 @@ const ThreeDEmbeddingsPanel = () => {
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent) => {
-      // No hover while a button is held (rotating or drawing a lasso)
+      // No hover while a button is held (orbiting or drawing a lasso)
       if (e.buttons !== 0) {
         clearHover();
         return;
       }
 
-      // Throttle picking; it's O(points)
       const now = performance.now();
-      if (now - lastHoverPickRef.current < 50) return;
+      if (now - lastHoverPickRef.current < HOVER_PICK_INTERVAL_MS) return;
       lastHoverPickRef.current = now;
 
-      const gd = plotRef.current?.el;
-      if (!gd || !plotData) return;
+      const deck = deckRef.current;
+      const area = plotAreaRef.current;
+      if (!deck || !area || !plotData) return;
 
-      const index = pickNearestPoint(
-        gd,
-        plotData,
-        { x: e.clientX, y: e.clientY },
-        16
-      );
+      const index = pickPointIndex(deck, area, e.clientX, e.clientY);
       if (index === null) {
         clearHover();
         return;
       }
 
+      setDollyAnchor(pointAt(plotData, index));
+
       if (hoverPreviewRef.current?.index !== index) {
-        const pos = projectPointToClient(
-          gd,
-          plotData.x[index],
-          plotData.y[index],
-          plotData.z[index]
-        );
-        if (pos) {
-          const preview = { index, x: pos.x, y: pos.y };
-          hoverPreviewRef.current = preview;
-          setHoverPreview(preview);
+        const rect = area.getBoundingClientRect();
+        const viewport = deck.deck?.getViewports?.()[0];
+        let cx = e.clientX;
+        let cy = e.clientY;
+        if (viewport) {
+          const p = viewport.project(pointAt(plotData, index));
+          cx = rect.left + p[0];
+          cy = rect.top + p[1];
         }
+        const preview = { index, x: cx, y: cy };
+        hoverPreviewRef.current = preview;
+        setHoverPreview(preview);
       }
     },
     [plotData, clearHover]
@@ -674,41 +445,35 @@ const ThreeDEmbeddingsPanel = () => {
 
   // Selection only happens in select mode, through the overlay: a drag
   // lassos a region (replacing the selection), a click toggles the nearest
-  // point. Exploration (orbit/hover) can never select accidentally — and
-  // since we never listen to plotly's click events, gl3d's synthetic
-  // repeated clicks (emitted from its render loop while a button is held)
-  // are a non-issue.
-  //
-  // The lasso is resolved server-side: only the polygon and the camera
-  // projection go over the wire, never id lists.
+  // point. The lasso is resolved server-side: only the polygon and the
+  // view-projection matrix go over the wire, never id lists.
   const handleLassoComplete = useCallback(
     (polygon: Point2D[]) => {
-      const gd = plotRef.current?.el;
-      if (!gd || !plotData) return;
+      const deck = deckRef.current;
+      const area = plotAreaRef.current;
+      if (!deck?.deck || !area || !plotData) return;
 
-      const projection = getProjectionParams(gd);
+      const rect = area.getBoundingClientRect();
+      const projection = getDeckProjection(deck.deck, rect);
       if (!projection) return;
 
-      captureCamera();
       plotSelection.handleLasso(polygon, projection);
     },
-    [plotData, plotSelection, captureCamera]
+    [plotData, plotSelection]
   );
 
   const handlePick = useCallback(
     (point: Point2D) => {
-      const gd = plotRef.current?.el;
-      if (!gd || !plotData) return;
+      const deck = deckRef.current;
+      const area = plotAreaRef.current;
+      if (!deck || !area) return;
 
-      const index = pickNearestPoint(gd, plotData, point);
-      if (index === null) {
-        return; // empty space: keep mode, change nothing
-      }
+      const index = pickPointIndex(deck, area, point.x, point.y);
+      if (index === null) return;
 
-      captureCamera();
       plotSelection.toggleSelected(index);
     },
-    [plotData, plotSelection, captureCamera]
+    [plotSelection]
   );
 
   const handleSelectModeExit = useCallback(
@@ -747,19 +512,28 @@ const ThreeDEmbeddingsPanel = () => {
     setSelectMode(true);
   }, [plotData, setSelectMode]);
 
-  // Grab-hand cursor animates to "grabbing" while rotating the scene
-  const [grabbing, setGrabbing] = useState(false);
-  useEffect(() => {
-    if (!grabbing) return;
-    const onUp = () => setGrabbing(false);
-    window.addEventListener('pointerup', onUp);
-    return () => window.removeEventListener('pointerup', onUp);
-  }, [grabbing]);
-
+  // deck's canvas, for forwarding wheel events from the select-mode
+  // overlay so cursor-zoom keeps working while the overlay swallows drags
   const getCanvas = useCallback(
-    () => (getScene()?.glplot?.canvas ?? null) as HTMLCanvasElement | null,
-    [getScene]
+    () =>
+      (plotAreaRef.current?.querySelector('canvas') ??
+        null) as HTMLCanvasElement | null,
+    []
   );
+
+  const getCursor = useCallback(
+    ({ isDragging }: { isDragging: boolean }) =>
+      isDragging ? 'grabbing' : 'grab',
+    []
+  );
+
+  const view = useMemo(() => {
+    const height =
+      plotAreaRef.current?.clientHeight ||
+      getCanvas()?.clientHeight ||
+      700;
+    return buildOrbitView(!!is2D, bounds, viewState?.zoom ?? 0, height);
+  }, [is2D, bounds, viewState?.zoom, getCanvas]);
 
   // Resolve the hovered point's sample id + filepath lazily by index
   // (one tiny request per first hover, cached afterwards)
@@ -769,7 +543,6 @@ const ThreeDEmbeddingsPanel = () => {
   );
 
   useEffect(() => {
-    const brainKey = brainResultSelector.brainKey;
     const colorBy = labelSelector.label;
     if (hoverPreview === null || !plotData || !brainKey) {
       setHoverInfo(null);
@@ -815,13 +588,7 @@ const ThreeDEmbeddingsPanel = () => {
     return () => {
       stale = true;
     };
-  }, [
-    hoverPreview,
-    plotData,
-    datasetName,
-    brainResultSelector.brainKey,
-    labelSelector.label,
-  ]);
+  }, [hoverPreview, plotData, datasetName, brainKey, labelSelector.label]);
 
   const hoverSrc = hoverInfo?.filepath
     ? (fos.getSampleSrc(hoverInfo.filepath) as string)
@@ -839,23 +606,10 @@ const ThreeDEmbeddingsPanel = () => {
   const selectClass = useCallback(
     (label: string) => {
       if (!labelSelector.label) return;
-
-      captureCamera();
       plotSelection.handleClassSelect(labelSelector.label, label);
     },
-    [labelSelector.label, plotSelection, captureCamera]
+    [labelSelector.label, plotSelection]
   );
-
-  const plotConfig = useMemo(
-    () => ({
-      displayModeBar: false,
-      displaylogo: false,
-      responsive: true,
-    }),
-    []
-  );
-
-  const plotStyle = useMemo(() => ({ width: '100%', height: '100%' }), []);
 
   if (!brainResultSelector.canSelect) {
     return centerMessage(
@@ -1003,27 +757,29 @@ const ThreeDEmbeddingsPanel = () => {
 
       {!plotError && plotData && (
         <>
-          {/* Explore mode: grab cursor (grabbing while rotating);
+          {/* Explore mode: grab cursor (grabbing while orbiting);
               double-click enters select mode */}
           <div
             ref={plotAreaRef}
-            style={{
-              position: 'absolute',
-              inset: 0,
-              cursor: grabbing ? 'grabbing' : 'grab',
-            }}
+            style={{ position: 'absolute', inset: 0 }}
             onDoubleClick={handleExploreDoubleClick}
-            onPointerDown={() => setGrabbing(true)}
           >
-            <Plot
-              ref={plotRef}
-              data={plotTraces as any}
-              layout={plotLayout as any}
-              config={plotConfig}
-              style={plotStyle}
-              onRelayout={handleRelayout}
-              useResizeHandler={true}
-            />
+            {viewState && (
+              <DeckGL
+                ref={deckRef}
+                views={view}
+                viewState={viewState}
+                onViewStateChange={onViewStateChange}
+                controller={controller}
+                layers={layers}
+                getCursor={getCursor}
+                style={{
+                  position: 'absolute',
+                  width: '100%',
+                  height: '100%',
+                }}
+              />
+            )}
           </div>
           {selectMode && (
             <LassoOverlay

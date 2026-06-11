@@ -49,5 +49,5 @@ export function useSelectionEffect() {
         },
       }
     );
-  }, [datasetName, brainKey, view, filters, plotData]);
+  }, [datasetName, brainKey, view, filters, plotData, setViewBitmask]);
 }

@@ -1,17 +1,17 @@
 /**
- * Color helpers for per-point trace styling.
+ * Color helpers for the deck.gl point renderer.
  *
- * scatter3d does not support plotly's selected/unselected styling, so
- * dimming is achieved by computing explicit per-point colors. Solid colors
- * are used throughout: translucent (rgba) scatter3d markers render with
- * ugly WebGL blending artifacts, so dimming blends toward the panel
- * background color instead.
+ * Point colors are uploaded to the GPU as a Uint8 RGB attribute buffer
+ * (see deckScene.ts), so these helpers work in RGB tuples rather than
+ * hex/css strings. Dimming blends a point's color toward the panel
+ * background (solid colors, not alpha — translucent overdraw at scale
+ * looks muddy).
  */
 
-type RGB = [number, number, number];
+export type RGB = [number, number, number];
 
-// Plotly's exact Viridis stops (plotly.js/src/components/colorscale/scales.js)
-// so client-computed colors match what plotly renders via colorscale
+// Plotly's exact Viridis stops (kept for parity with the builtin panel and
+// the legend gradient), pre-parsed to RGB once for the per-point colormap.
 const VIRIDIS_STOPS: Array<[number, string]> = [
   [0, '#440154'],
   [0.06274509803921569, '#48186a'],
@@ -44,18 +44,13 @@ function hexToRgb(hex: string): RGB {
   ];
 }
 
-function rgbToHex([r, g, b]: RGB): string {
-  return `#${[r, g, b]
-    .map((c) => Math.round(c).toString(16).padStart(2, '0'))
-    .join('')}`;
-}
-
 // Parses any CSS color (hex, rgb(), hsl(), named) by letting the browser
-// normalize it through a canvas fillStyle
+// normalize it through a canvas fillStyle. Cached: category palettes and
+// the theme background are parsed repeatedly.
 let canvasCtx: CanvasRenderingContext2D | null = null;
 const cssColorCache = new Map<string, RGB>();
 
-function cssToRgb(color: string): RGB {
+export function cssToRgb(color: string): RGB {
   const cached = cssColorCache.get(color);
   if (cached) return cached;
 
@@ -82,42 +77,34 @@ function cssToRgb(color: string): RGB {
 }
 
 /** Blends `color` toward `background` by `amount` (0 = unchanged, 1 = bg) */
-export function dimToward(
-  color: string,
-  background: string,
-  amount: number
-): string {
-  const [r, g, b] = cssToRgb(color);
-  const [br, bg_, bb] = cssToRgb(background);
-  return rgbToHex([
-    r + (br - r) * amount,
-    g + (bg_ - g) * amount,
-    b + (bb - b) * amount,
-  ]);
+export function blendRgb(color: RGB, background: RGB, amount: number): RGB {
+  return [
+    color[0] + (background[0] - color[0]) * amount,
+    color[1] + (background[1] - color[1]) * amount,
+    color[2] + (background[2] - color[2]) * amount,
+  ];
 }
 
-// Stops pre-parsed to RGB once: viridis() runs per point on every
-// recolor, and re-parsing hex strings there is wasted work at scale
 const VIRIDIS_RGB_STOPS: Array<[number, RGB]> = VIRIDIS_STOPS.map(
   ([t, hex]) => [t, hexToRgb(hex)]
 );
 
-/** Maps t in [0, 1] to a viridis hex color (matches plotly's Viridis) */
-function viridis(t: number): string {
+/** Maps t in [0, 1] to a viridis RGB color (matches plotly's Viridis) */
+export function viridisRgb(t: number): RGB {
   const clamped = Math.max(0, Math.min(1, t));
   for (let i = 1; i < VIRIDIS_RGB_STOPS.length; i++) {
     const [t1, rgb1] = VIRIDIS_RGB_STOPS[i];
     if (clamped <= t1) {
       const [t0, rgb0] = VIRIDIS_RGB_STOPS[i - 1];
       const f = (clamped - t0) / (t1 - t0);
-      return rgbToHex([
+      return [
         rgb0[0] + f * (rgb1[0] - rgb0[0]),
         rgb0[1] + f * (rgb1[1] - rgb0[1]),
         rgb0[2] + f * (rgb1[2] - rgb0[2]),
-      ]);
+      ];
     }
   }
-  return VIRIDIS_STOPS[VIRIDIS_STOPS.length - 1][1];
+  return VIRIDIS_RGB_STOPS[VIRIDIS_RGB_STOPS.length - 1][1];
 }
 
 /** Loop-based min/max; Math.min(...values) overflows the stack on ~100k+ */
@@ -130,17 +117,6 @@ export function minMax(values: ArrayLike<number>): { min: number; max: number } 
     if (v > max) max = v;
   }
   return { min, max };
-}
-
-/** Converts numeric color values to viridis hex colors */
-export function numericToColors(values: ArrayLike<number>): string[] {
-  const { min, max } = minMax(values);
-  const range = max - min || 1;
-  const out = new Array<string>(values.length);
-  for (let i = 0; i < values.length; i++) {
-    out[i] = viridis((values[i] - min) / range);
-  }
-  return out;
 }
 
 /** CSS gradient matching the viridis colorscale, for the legend overlay */

@@ -41,9 +41,19 @@ interface GeometryAssembly {
 
 let assembly: GeometryAssembly | null = null;
 
+function plotDataSlice(a: GeometryAssembly, count: number) {
+  return {
+    x: a.x.subarray(0, count),
+    y: a.y.subarray(0, count),
+    z: a.z.subarray(0, count),
+    count,
+    num_dims: a.numDims,
+  };
+}
+
 // Above this many loaded points, skip the progressive per-chunk plot
-// updates (each one is a full plotly trace rebuild of everything loaded
-// so far) and only render on completion
+// updates (each one rebuilds and re-uploads the full geometry buffer of
+// everything loaded so far) and only render on completion
 const PROGRESSIVE_RENDER_LIMIT = 1000000;
 
 function decodeF32(b64: string): Float32Array {
@@ -199,24 +209,11 @@ class SetPlotDataChunk extends Operator {
           `geometry stream complete: ` +
             `${assembly.count.toLocaleString()} points in ${totalMs}ms`
         );
-        hooks.setPlotData({
-          x: assembly.x,
-          y: assembly.y,
-          z: assembly.z,
-          count: assembly.count,
-          num_dims: assembly.numDims,
-        });
+        hooks.setPlotData(plotDataSlice(assembly, assembly.count));
         hooks.setPlotError(null);
         assembly = null;
       } else if (assembly.loadedPoints <= PROGRESSIVE_RENDER_LIMIT) {
-        // Progressive rendering: show what has arrived so far
-        hooks.setPlotData({
-          x: assembly.x.subarray(0, assembly.loadedPoints),
-          y: assembly.y.subarray(0, assembly.loadedPoints),
-          z: assembly.z.subarray(0, assembly.loadedPoints),
-          count: assembly.loadedPoints,
-          num_dims: assembly.numDims,
-        });
+        hooks.setPlotData(plotDataSlice(assembly, assembly.loadedPoints));
         hooks.setPlotError(null);
       }
     } catch (e) {

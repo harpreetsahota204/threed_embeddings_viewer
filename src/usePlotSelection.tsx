@@ -76,7 +76,7 @@ function useUntagSelection() {
  * it only touches global state.
  */
 export function useClearLassoSelection() {
-  const view = useRecoilValue(fos.view) as any[];
+  const view = useRecoilValue(fos.view) as unknown[];
   const setView = fos.useSetView();
   const [selectedSamples, setSelectedSamples] = useRecoilState<Set<string>>(
     fos.selectedSamples
@@ -111,7 +111,7 @@ export function useClearLassoSelection() {
  * been observed in the view and is then missing was removed externally.
  */
 export function useLassoStageWatchdog() {
-  const view = useRecoilValue(fos.view) as any[];
+  const view = useRecoilValue(fos.view) as unknown[];
   const [stageId, setStageId] = useRecoilState(lassoStageIdAtom);
   const [lassoSelection, setLassoSelection] =
     useRecoilState(lassoSelectionAtom);
@@ -154,7 +154,7 @@ export function useLassoStageWatchdog() {
 export function usePlotSelection() {
   const datasetName = useRecoilValue(fos.datasetName) as string;
   const [brainKey] = useBrainResult();
-  const view = useRecoilValue(fos.view) as any[];
+  const view = useRecoilValue(fos.view) as unknown[];
   const setView = fos.useSetView();
   const [selectedSamples, setSelectedSamples] = useRecoilState<Set<string>>(
     fos.selectedSamples
