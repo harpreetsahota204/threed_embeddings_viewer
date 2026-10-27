@@ -64,8 +64,8 @@ class legend.
 ## Installation
 
 ```bash
-# Clone into your FiftyOne plugins directory
-fiftyone plugins download https://github.com/harpreetsahota204/threed-embeddings
+# Download into your FiftyOne plugins directory
+fiftyone plugins download https://github.com/harpreetsahota204/threed_embeddings_viewer
 ```
 
 ## Getting started
